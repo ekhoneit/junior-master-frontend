@@ -1,0 +1,427 @@
+"use client";
+
+import { useState, useEffect, useRef } from "react";
+import { usePathname } from "next/navigation";
+import Link from "next/link";
+import { Sparkles, Mic, MicOff, Volume2, VolumeX, Send, X, Bot, User, ExternalLink } from "lucide-react";
+import { apiClient } from "@/lib/apiClient";
+
+export default function AiAssistantWidget() {
+  const pathname = usePathname();
+  const isLandingOrCheckout = pathname?.startsWith("/landing") || pathname?.startsWith("/checkout");
+
+  const [isOpen, setIsOpen] = useState(false);
+  const [messages, setMessages] = useState([
+    {
+      role: "assistant",
+      text: "আসসালামু আলাইকুম! Glow Korean Beauty-এ আপনাকে স্বাগতম। আপনি কোন পণ্যটি খুঁজছেন বা কোনো তথ্য জানতে চান কি?",
+    },
+  ]);
+  const [inputValue, setInputValue] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [isVoiceActive, setIsVoiceActive] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [speechSupported, setSpeechSupported] = useState(false);
+
+
+
+  // Helper to extract product slug if user is currently on /product/[slug]
+  const getCurrentProductSlug = () => {
+    if (!pathname) return null;
+    const match = pathname.match(/\/product\/([^\/?#]+)/);
+    return match ? decodeURIComponent(match[1]) : null;
+  };
+
+  // Render message text with auto-linkified URLs
+  const renderMessageContent = (text) => {
+    if (!text) return null;
+    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    const parts = text.split(urlRegex);
+
+    return parts.map((part, index) => {
+      if (part.match(urlRegex)) {
+        const isInternalProduct = part.includes('/product/');
+        let path = part;
+        try {
+          const parsed = new URL(part);
+          path = parsed.pathname + parsed.search;
+        } catch (_) {}
+
+        return (
+          <Link
+            key={index}
+            href={isInternalProduct ? path : part}
+            target={isInternalProduct ? "_self" : "_blank"}
+            rel="noopener noreferrer"
+            onClick={() => {
+              if (isInternalProduct) setIsOpen(false);
+            }}
+            className="inline-flex items-center gap-1 font-bold text-[#D48B80] underline underline-offset-2 hover:text-[#BF756A] bg-orange-50 px-1.5 py-0.5 rounded mx-1 transition-colors"
+          >
+            <span>{isInternalProduct ? "পণ্যটি দেখুন ↗" : part}</span>
+            <ExternalLink size={11} className="inline shrink-0" />
+          </Link>
+        );
+      }
+      return <span key={index}>{part}</span>;
+    });
+  };
+
+  const messagesEndRef = useRef(null);
+  const recognitionRef = useRef(null);
+
+  // Initialize Speech Recognition & Synthesis capabilities
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (SpeechRecognition) {
+        setSpeechSupported(true);
+        const recognition = new SpeechRecognition();
+        recognition.lang = "bn-BD";
+        recognition.continuous = false;
+        recognition.interimResults = false;
+
+        recognition.onresult = (event) => {
+          const transcript = event.results[0][0].transcript;
+          if (transcript) {
+            setInputValue(transcript);
+            handleSendMessage(transcript);
+          }
+          setIsVoiceActive(false);
+        };
+
+        recognition.onerror = () => {
+          setIsVoiceActive(false);
+        };
+
+        recognition.onend = () => {
+          setIsVoiceActive(false);
+        };
+
+        recognitionRef.current = recognition;
+      }
+    }
+  }, []);
+
+  const audioPlayerRef = useRef(null);
+  const [playingIndex, setPlayingIndex] = useState(null);
+
+  // Play natural Bengali voice via server-side streaming API
+  const speakText = (text, messageIndex = null) => {
+    if (!text) return;
+    const cleanText = text.replace(/[*#_~`]/g, "").trim();
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
+    const ttsUrl = `${apiUrl}/api/ai/tts?text=${encodeURIComponent(cleanText)}`;
+
+    stopSpeaking();
+
+    const audio = new Audio(ttsUrl);
+    audio.playbackRate = 1.15; // Natural, energetic, fast speaking speed
+    audioPlayerRef.current = audio;
+    setIsSpeaking(true);
+    setPlayingIndex(messageIndex);
+
+    audio.onended = () => {
+      setIsSpeaking(false);
+      setPlayingIndex(null);
+    };
+    audio.onerror = () => {
+      setIsSpeaking(false);
+      setPlayingIndex(null);
+    };
+
+    audio.play().catch((err) => {
+      console.warn("Audio playback failed:", err?.message);
+      setIsSpeaking(false);
+      setPlayingIndex(null);
+    });
+  };
+
+  const stopSpeaking = () => {
+    if (audioPlayerRef.current) {
+      audioPlayerRef.current.pause();
+      audioPlayerRef.current.currentTime = 0;
+      audioPlayerRef.current = null;
+    }
+    if (typeof window !== "undefined" && window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+    setIsSpeaking(false);
+    setPlayingIndex(null);
+  };
+
+  // Auto-scroll messages
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  // Toggle voice recording
+  const toggleVoiceRecording = () => {
+    if (!recognitionRef.current) return;
+
+    if (isVoiceActive) {
+      recognitionRef.current.stop();
+      setIsVoiceActive(false);
+    } else {
+      stopSpeaking();
+      try {
+        recognitionRef.current.start();
+        setIsVoiceActive(true);
+      } catch (err) {
+        console.warn("Recognition start error:", err);
+      }
+    }
+  };
+
+  const handleSendMessage = async (textToSend = null) => {
+    const text = (textToSend || inputValue).trim();
+    if (!text || isLoading) return;
+
+    setInputValue("");
+    const userMsg = { role: "user", text };
+    setMessages((prev) => [...prev, userMsg]);
+    setIsLoading(true);
+
+    try {
+      const currentProductSlug = getCurrentProductSlug();
+      const res = await apiClient("/api/ai/chat", {
+        method: "POST",
+        body: JSON.stringify({
+          message: text,
+          currentProductId: currentProductSlug,
+        }),
+      });
+
+      const reply = res?.reply || res?.data?.reply || "দুঃখিত, কোনো উত্তর পাওয়া যায়নি।";
+      const botMsg = { role: "assistant", text: reply };
+      setMessages((prev) => [...prev, botMsg]);
+      // Note: Voice is NOT auto-played. User can click 'শুনুন' button if they want to listen.
+    } catch (err) {
+      console.error("AI Assistant query failed:", err);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          text: "দুঃখিত, সার্ভারের সাথে সংযোগে সমস্যা হচ্ছে। একটু পর আবার চেষ্টা করুন।",
+        },
+      ]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  if (isLandingOrCheckout) {
+    return null;
+  }
+
+  return (
+    <>
+      {/* Floating Launcher Button */}
+      <div className="fixed bottom-6 right-6 z-[80] flex items-center gap-3">
+        {!isOpen && (
+          <button
+            type="button"
+            onClick={() => {
+              setIsOpen(true);
+            }}
+            className="group relative flex items-center gap-2.5 px-4 py-3 bg-gradient-to-r from-[#D48B80] via-[#FF6B35] to-[#D48B80] text-white font-bold text-xs sm:text-sm rounded-full shadow-2xl hover:scale-105 active:scale-95 transition-all duration-300 border-2 border-white/40 cursor-pointer"
+          >
+            <span className="relative flex h-3 w-3">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-75" />
+              <span className="relative inline-flex rounded-full h-3 w-3 bg-white" />
+            </span>
+            <Sparkles size={17} className="animate-pulse" />
+            <span>AI Voice Assistant</span>
+          </button>
+        )}
+      </div>
+
+      {/* AI Assistant Chat Modal */}
+      {isOpen && (
+        <div className="fixed bottom-6 right-4 sm:right-6 w-[92vw] sm:w-[400px] h-[550px] max-h-[88vh] bg-white rounded-3xl shadow-2xl border border-slate-200/90 flex flex-col z-[80] overflow-hidden animate-in fade-in slide-in-from-bottom-5 duration-300">
+          {/* Header */}
+          <div className="bg-gradient-to-r from-[#102D50] to-[#1E4675] text-white p-4 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-white/10 backdrop-blur-md flex items-center justify-center border border-white/20 text-[#D48B80]">
+                <Bot size={22} className="text-white" />
+              </div>
+              <div>
+                <h3 className="font-bold text-sm flex items-center gap-1.5">
+                  <span>Glow Korean Beauty AI Assistant</span>
+                  <span className="w-2 h-2 rounded-full bg-green-400" />
+                </h3>
+                <p className="text-[11px] text-slate-300">বাংলায় কথা বলুন বা লিখুন</p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              {isSpeaking ? (
+                <button
+                  type="button"
+                  onClick={stopSpeaking}
+                  className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white transition cursor-pointer"
+                  title="Stop speaking"
+                >
+                  <VolumeX size={16} />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => speakText(messages[messages.length - 1]?.text || "")}
+                  className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white transition cursor-pointer"
+                  title="Listen last message"
+                >
+                  <Volume2 size={16} />
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  stopSpeaking();
+                  setIsOpen(false);
+                }}
+                className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white transition cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+          </div>
+
+          {/* Messages Area */}
+          <div className="flex-1 overflow-y-auto p-4 space-y-3.5 bg-slate-50/70">
+            {messages.map((msg, i) => {
+              const isUser = msg.role === "user";
+              return (
+                <div
+                  key={i}
+                  className={`flex gap-2.5 ${isUser ? "justify-end" : "justify-start"}`}
+                >
+                  {!isUser && (
+                    <div className="w-7 h-7 rounded-xl bg-[#D48B80] text-white flex items-center justify-center shrink-0 mt-0.5 text-xs font-bold shadow-xs">
+                      E
+                    </div>
+                  )}
+                  <div
+                    className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 text-xs sm:text-[13px] leading-relaxed shadow-2xs ${
+                      isUser
+                        ? "bg-[#D48B80] text-white rounded-tr-none font-medium"
+                        : "bg-white text-slate-800 border border-slate-200/80 rounded-tl-none font-normal"
+                    }`}
+                  >
+                    <div className="whitespace-pre-line leading-relaxed">
+                      {isUser ? msg.text : renderMessageContent(msg.text)}
+                    </div>
+                    {!isUser && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (isSpeaking && playingIndex === i) {
+                            stopSpeaking();
+                          } else {
+                            speakText(msg.text, i);
+                          }
+                        }}
+                        className={`mt-2 text-[11px] font-medium flex items-center gap-1.5 px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
+                          isSpeaking && playingIndex === i
+                            ? "bg-[#D48B80]/10 text-[#D48B80] border border-[#D48B80]/30 font-semibold"
+                            : "bg-slate-100 hover:bg-slate-200 text-slate-600 hover:text-[#D48B80]"
+                        }`}
+                      >
+                        {isSpeaking && playingIndex === i ? (
+                          <>
+                            <VolumeX size={13} className="text-[#D48B80] animate-pulse" />
+                            <span>বন্ধ করুন</span>
+                          </>
+                        ) : (
+                          <>
+                            <Volume2 size={13} />
+                            <span>শুনুন</span>
+                          </>
+                        )}
+                      </button>
+                    )}
+                  </div>
+                  {isUser && (
+                    <div className="w-7 h-7 rounded-xl bg-slate-200 text-slate-700 flex items-center justify-center shrink-0 mt-0.5 text-xs font-bold">
+                      <User size={14} />
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+            {isLoading && (
+              <div className="flex items-center gap-2 text-slate-400 text-xs pl-9">
+                <span className="w-2 h-2 rounded-full bg-[#D48B80] animate-bounce" />
+                <span className="w-2 h-2 rounded-full bg-[#D48B80] animate-bounce delay-100" />
+                <span className="w-2 h-2 rounded-full bg-[#D48B80] animate-bounce delay-200" />
+                <span className="text-[11px] text-slate-500 font-medium">AI চিন্তা করছে...</span>
+              </div>
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+
+          {/* Quick Prompts - Flex wrap on desktop/mobile so all options are clearly visible */}
+          <div className="px-3 py-2 bg-slate-50/90 border-t border-slate-200/80 flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
+            {[
+              "ডেলিভারি চার্জ কত?",
+              "কী কী কালার আছে?",
+              "ডিসকাউন্টে দাম কত?",
+              "ক্যাশ অন ডেলিভারি আছে?",
+              "প্রোডাক্ট লিংক দিন"
+            ].map((prompt, idx) => (
+              <button
+                key={idx}
+                type="button"
+                onClick={() => handleSendMessage(prompt)}
+                className="px-2.5 py-1 bg-white hover:bg-orange-50 border border-slate-200 hover:border-[#D48B80]/40 text-slate-700 hover:text-[#D48B80] text-[11px] rounded-lg transition-colors cursor-pointer font-medium shadow-2xs"
+              >
+                {prompt}
+              </button>
+            ))}
+          </div>
+
+          {/* Input & Voice Controls */}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleSendMessage();
+            }}
+            className="p-3 bg-white border-t border-slate-200 flex items-center gap-2"
+          >
+            {speechSupported && (
+              <button
+                type="button"
+                onClick={toggleVoiceRecording}
+                className={`p-2.5 rounded-xl transition-all cursor-pointer ${
+                  isVoiceActive
+                    ? "bg-red-500 text-white animate-pulse shadow-md"
+                    : "bg-slate-100 hover:bg-slate-200 text-slate-600"
+                }`}
+                title={isVoiceActive ? "Listening... Click to stop" : "Speak in Bengali"}
+              >
+                {isVoiceActive ? <MicOff size={17} /> : <Mic size={17} />}
+              </button>
+            )}
+
+            <input
+              type="text"
+              value={inputValue}
+              onChange={(e) => setInputValue(e.target.value)}
+              placeholder={isVoiceActive ? "বাংলায় কথা বলুন..." : "আপনার প্রশ্নটি বাংলায় লিখুন..."}
+              className="flex-1 bg-slate-100/90 border border-slate-200/90 rounded-xl px-3.5 py-2 text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-[#D48B80]/20 focus:border-[#D48B80]"
+            />
+
+            <button
+              type="submit"
+              disabled={!inputValue.trim() || isLoading}
+              className="p-2.5 rounded-xl bg-[#D48B80] hover:bg-[#BF756A] text-white disabled:opacity-40 transition cursor-pointer shadow-xs active:scale-95"
+            >
+              <Send size={16} />
+            </button>
+          </form>
+        </div>
+      )}
+    </>
+  );
+}

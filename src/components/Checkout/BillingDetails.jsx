@@ -1,0 +1,1262 @@
+// components/Checkout/BillingDetails.jsx
+"use client";
+
+import React, { useState, useEffect, useRef } from "react";
+import { apiClient } from "@/lib/apiClient";
+import { divisions, districts, upazilas } from "@/lib/data";
+import Link from "next/link";
+import {
+  Home,
+  Briefcase,
+  MapPin,
+  Plus,
+  Star,
+  X,
+  Truck,
+  CreditCard,
+  FileText,
+  User,
+  Phone,
+  Mail,
+} from "lucide-react";
+import Swal from "sweetalert2";
+import Image from "next/image";
+import { FaLongArrowAltRight } from "react-icons/fa";
+import { calculateDeliveryCharges } from "@/lib/deliveryCharge";
+import {
+  sendAbandonedOrderBeacon,
+  sendAbandonedOrderCall,
+} from "@/lib/abandonedOrderTracker";
+
+const BillingDetails = ({
+  user = null,
+  register,
+  errors = {},
+  watch,
+  setValue,
+  handleSubmit,
+  onCheckoutSubmit,
+  loading = false,
+  setLoading,
+  totalAmount = 0,
+  placeOrderRef,
+  cartItems = [],
+  deliveryCharges: externalDeliveryCharges = null,
+}) => {
+  const [localStoredUser, setLocalStoredUser] = useState(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const stored = localStorage.getItem("supabase_user");
+        return stored ? JSON.parse(stored) : null;
+      } catch (_) {
+        return null;
+      }
+    }
+    return null;
+  });
+
+  useEffect(() => {
+    if (user) {
+      setLocalStoredUser(user);
+    }
+    const updateFromStorage = () => {
+      try {
+        const stored = localStorage.getItem("supabase_user");
+        setLocalStoredUser(stored ? JSON.parse(stored) : null);
+      } catch (_) {}
+    };
+    window.addEventListener("authChange", updateFromStorage);
+    window.addEventListener("storage", updateFromStorage);
+    return () => {
+      window.removeEventListener("authChange", updateFromStorage);
+      window.removeEventListener("storage", updateFromStorage);
+    };
+  }, [user]);
+
+  const effectiveUser = user || localStoredUser;
+
+  const [customerId, setCustomerId] = useState(null);
+  const [addresses, setAddresses] = useState([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [selectedAddress, setSelectedAddress] = useState(null);
+  const [isAddingNewAddress, setIsAddingNewAddress] = useState(false);
+  const [showAllAddresses, setShowAllAddresses] = useState(false);
+  const [filteredDistricts, setFilteredDistricts] = useState([]);
+  const [filteredUpazilas, setFilteredUpazilas] = useState([]);
+
+  const watchRecipientName = watch("recipientName");
+  const watchPhoneNumber = watch("phoneNumber");
+  const watchEmail = watch("email");
+  const watchAddress = watch("address");
+  const watchType = watch("type");
+  const watchDivision = watch("division");
+  const watchDistrict = watch("district");
+  const watchUpazila = watch("upazila");
+  const watchPayment = watch("payment");
+  const watchShipping = watch("shipping");
+  const watchNote = watch("note");
+
+  // Restore cached guest shipping details on initial mount
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    try {
+      const savedDetails = localStorage.getItem(
+        "glowbeauty_checkout_shipping_details",
+      );
+      if (savedDetails) {
+        const parsed = JSON.parse(savedDetails);
+        if (parsed && typeof parsed === "object") {
+          if (!effectiveUser?.fullName && parsed.recipientName) {
+            setValue("recipientName", parsed.recipientName, {
+              shouldDirty: true,
+            });
+          }
+          if (!effectiveUser?.phone && parsed.phoneNumber) {
+            setValue("phoneNumber", parsed.phoneNumber, { shouldDirty: true });
+          }
+          if (parsed.email) {
+            setValue("email", parsed.email, { shouldDirty: true });
+          }
+          if (parsed.division) {
+            setValue("division", parsed.division, { shouldDirty: true });
+          }
+          if (parsed.district) {
+            setValue("district", parsed.district, { shouldDirty: true });
+          }
+          if (parsed.upazila) {
+            setValue("upazila", parsed.upazila, { shouldDirty: true });
+          }
+          if (parsed.address) {
+            setValue("address", parsed.address, { shouldDirty: true });
+          }
+          if (parsed.type) {
+            setValue("type", parsed.type, { shouldDirty: true });
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Error restoring cached shipping details:", e);
+    }
+
+    if (effectiveUser) {
+      const uName =
+        effectiveUser.fullName || effectiveUser.user_metadata?.full_name;
+      const uPhone = effectiveUser.phone || effectiveUser.user_metadata?.phone;
+      const uEmail = effectiveUser.email;
+      if (uName) setValue("recipientName", uName);
+      if (uPhone) setValue("phoneNumber", uPhone);
+      if (uEmail) setValue("email", uEmail);
+    }
+  }, [effectiveUser, setValue]);
+
+  // Debounced auto-save of entered shipping details to localStorage...
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const timer = setTimeout(() => {
+      if (
+        watchRecipientName ||
+        watchPhoneNumber ||
+        watchEmail ||
+        watchAddress ||
+        watchDivision ||
+        watchDistrict ||
+        watchUpazila
+      ) {
+        try {
+          const toSave = {
+            recipientName: watchRecipientName || "",
+            phoneNumber: watchPhoneNumber || "",
+            email: watchEmail || "",
+            division: watchDivision || "",
+            district: watchDistrict || "",
+            upazila: watchUpazila || "",
+            address: watchAddress || "",
+            type: watchType || "Home",
+          };
+          localStorage.setItem(
+            "glowbeauty_checkout_shipping_details",
+            JSON.stringify(toSave),
+          );
+        } catch (e) {}
+      }
+    }, 400);
+
+    return () => clearTimeout(timer);
+  }, [
+    watchRecipientName,
+    watchPhoneNumber,
+    watchEmail,
+    watchAddress,
+    watchDivision,
+    watchDistrict,
+    watchUpazila,
+    watchType,
+  ]);
+
+  // Keep fresh abandonment data in ref & listen for browser exit
+  const abandonmentDataRef = useRef(null);
+  const abandonedSentRef = useRef(false);
+  const lastSentAddressRef = useRef("");
+
+  useEffect(() => {
+    const cleanPhone = (watchPhoneNumber || "").replace(/\D/g, "");
+    if (cleanPhone.length >= 11) {
+      const items = (cartItems || []).map((item) => ({
+        productId: item.productId || item.id,
+        productName: item.productName || item.name || item.title || "Product",
+        price: parseFloat(item.price || item.unitPrice || 0),
+        quantity: parseInt(item.quantity || 1, 10),
+        variant: item.variant || null,
+        attributes: item.variantAttributes || item.attributes || null,
+      }));
+
+      const fullAddr = [
+        watchAddress,
+        watchUpazila,
+        watchDistrict,
+        watchDivision,
+      ]
+        .filter(Boolean)
+        .join(", ");
+
+      const isOutsideDhaka =
+        watchDistrict && watchDistrict.toLowerCase() !== "dhaka";
+      const estimatedShippingCost = isOutsideDhaka
+        ? parseFloat(externalDeliveryCharges?.outside_dhaka || 150)
+        : parseFloat(externalDeliveryCharges?.inside_dhaka || 80);
+
+      abandonmentDataRef.current = {
+        name: (watchRecipientName || "").trim() || "Guest Customer",
+        phone: cleanPhone,
+        address: fullAddr || "Address not provided",
+        shippingCost: estimatedShippingCost,
+        items: items,
+      };
+
+      // Send to BizMation failed/abandoned orders API immediately once phone number is filled,
+      // and re-send/update if address is also typed (debounced 1.5s)
+      const currentAddressSnapshot = fullAddr.trim();
+      const shouldTrigger =
+        !abandonedSentRef.current ||
+        (currentAddressSnapshot.length >= 5 &&
+          currentAddressSnapshot !== lastSentAddressRef.current);
+
+      const timer = setTimeout(() => {
+        if (
+          abandonmentDataRef.current &&
+          shouldTrigger &&
+          !(typeof window !== "undefined" && window.__glowbeauty_order_placed__)
+        ) {
+          abandonedSentRef.current = true;
+          lastSentAddressRef.current = currentAddressSnapshot;
+          sendAbandonedOrderCall(abandonmentDataRef.current);
+        }
+      }, 1500);
+
+      return () => clearTimeout(timer);
+    } else {
+      abandonmentDataRef.current = null;
+    }
+  }, [
+    watchRecipientName,
+    watchPhoneNumber,
+    watchAddress,
+    watchUpazila,
+    watchDistrict,
+    watchDivision,
+    cartItems,
+    externalDeliveryCharges,
+  ]);
+
+  useEffect(() => {
+    const handleExit = () => {
+      // If user has successfully submitted the order, do not send abandoned beacon
+      if (typeof window !== "undefined" && window.__glowbeauty_order_placed__)
+        return;
+      if (abandonmentDataRef.current && !abandonedSentRef.current) {
+        abandonedSentRef.current = true;
+        sendAbandonedOrderBeacon(abandonmentDataRef.current);
+      }
+    };
+
+    window.addEventListener("beforeunload", handleExit);
+    window.addEventListener("pagehide", handleExit);
+
+    return () => {
+      window.removeEventListener("beforeunload", handleExit);
+      window.removeEventListener("pagehide", handleExit);
+    };
+  }, []);
+
+  // Fetch customer data and addresses if user is logged in
+  useEffect(() => {
+    const fetchCustomerData = async () => {
+      if (!effectiveUser?.email) {
+        setIsLoading(false);
+        return;
+      }
+      try {
+        setIsLoading(true);
+        setError(null);
+        const result = await apiClient(
+          `/api/customer/email/${encodeURIComponent(effectiveUser.email)}`,
+        );
+        let customerData = null;
+        if (result && result.success !== undefined) {
+          customerData = result.data;
+        } else if (result && result.id) {
+          customerData = result;
+        } else if (result && result.customer) {
+          customerData = result.customer;
+        }
+
+        if (customerData && customerData.id) {
+          setCustomerId(customerData.id);
+          setAddresses(customerData.customerAddresses || []);
+          const defaultAddr = customerData.customerAddresses?.find(
+            (addr) => addr.isDefault,
+          );
+          if (defaultAddr) {
+            setSelectedAddress(defaultAddr.id);
+            prefillForm(defaultAddr);
+          }
+        } else {
+          setCustomerId(null);
+          setAddresses([]);
+        }
+      } catch (error) {
+        console.error("Error fetching customer data:", error);
+        setCustomerId(null);
+        setAddresses([]);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    fetchCustomerData();
+  }, [effectiveUser?.email]);
+
+  // Filter districts based on division
+  useEffect(() => {
+    if (watchDivision) {
+      const divisionData = divisions.find((div) => div.name === watchDivision);
+      if (divisionData) {
+        const districtList = districts.filter(
+          (dist) => dist.division_id === divisionData.id,
+        );
+        setFilteredDistricts(districtList);
+        setValue("city", watchDivision);
+      }
+    } else {
+      setFilteredDistricts([]);
+      setValue("district", "");
+      setValue("upazila", "");
+      setFilteredUpazilas([]);
+    }
+  }, [watchDivision, setValue]);
+
+  // Filter upazilas based on district and update inside/outside dhaka
+  useEffect(() => {
+    if (watchDistrict) {
+      const districtData = districts.find(
+        (dist) => dist.name === watchDistrict,
+      );
+      if (districtData) {
+        const upazilaList = upazilas
+          .filter((upazila) => upazila.district_id === districtData.id)
+          .sort((a, b) => a.name.localeCompare(b.name));
+        setFilteredUpazilas(upazilaList);
+      }
+      const isDhaka =
+        watchDistrict.trim().toLowerCase() === "dhaka" ||
+        watchDistrict.trim().toLowerCase() === "dhaka district";
+      setValue("shipping", isDhaka ? "dhaka-city" : "outside", {
+        shouldDirty: true,
+      });
+    } else {
+      setFilteredUpazilas([]);
+      setValue("upazila", "");
+    }
+  }, [watchDistrict, setValue]);
+
+  const getIcon = (type) => {
+    switch (type) {
+      case "Home":
+        return <Home className="w-3 h-3 text-[#102D50]" />;
+      case "Office":
+        return <Briefcase className="w-3 h-3 text-[#102D50]" />;
+      default:
+        return <MapPin className="w-3 h-3 text-[#102D50]" />;
+    }
+  };
+
+  const prefillForm = (address) => {
+    setValue("recipientName", address.recipientName || user?.fullName || "");
+    setValue("phoneNumber", address.phoneNumber || user?.phone || "");
+    setValue("address", address.address);
+    setValue("upazila", address.upazila);
+    setValue("postalCode", address.postalCode);
+    setValue("district", address.district);
+    setValue("division", address.division);
+    setValue("city", address.city);
+    setValue("country", address.country || "Bangladesh");
+    setValue("type", address.type || "Home");
+    if (address.district) {
+      const isDhaka =
+        address.district.trim().toLowerCase() === "dhaka" ||
+        address.district.trim().toLowerCase() === "dhaka district";
+      setValue("shipping", isDhaka ? "dhaka-city" : "outside", {
+        shouldDirty: true,
+      });
+    }
+  };
+
+  const handleAddressSelect = (address) => {
+    setSelectedAddress(address.id);
+    prefillForm(address);
+    setShowAllAddresses(false);
+  };
+
+  // Handle place order when saved address is selected
+  const handlePlaceOrder = async () => {
+    if (!customerId) {
+      Swal.fire({
+        icon: "error",
+        title: "Error",
+        text: "Customer information is missing.",
+        confirmButtonColor: "#D48B80",
+      });
+      return;
+    }
+    if (!selectedAddress) {
+      Swal.fire({
+        icon: "error",
+        title: "Error",
+        text: "Please select a shipping address",
+        confirmButtonColor: "#D48B80",
+      });
+      return;
+    }
+
+    const paymentMethod = watchPayment || "cod";
+    const checkoutData = {
+      customerId: customerId,
+      customerAddressId: selectedAddress,
+      note: watchNote || "",
+      shippingMethod: watchShipping || "dhaka-city",
+      paymentMethod: paymentMethod,
+    };
+
+    await onCheckoutSubmit(checkoutData);
+  };
+
+  // Handle save new address and checkout (Guest or New Address flow)
+  const handleSaveAndCheckout = async (formData) => {
+    try {
+      const phoneNumber = (formData.phoneNumber || user?.phone || "").trim();
+      const cleanPhone = phoneNumber.replace(/\D/g, "");
+      const emailToUse = (
+        user?.email ||
+        formData.email ||
+        (cleanPhone ? `guest_${cleanPhone}@glowkoreanbeautybd.com` : "")
+      ).trim();
+      const recipientName = (
+        formData.recipientName ||
+        user?.fullName ||
+        ""
+      ).trim();
+
+      if (!phoneNumber) {
+        Swal.fire({
+          icon: "error",
+          title: "Error",
+          text: "ফোন নম্বর লিখুন",
+          confirmButtonColor: "#D48B80",
+        });
+        return;
+      }
+
+      if (!/^01\d{9}$/.test(cleanPhone)) {
+        Swal.fire({
+          icon: "error",
+          title: "ভুল ফোন নম্বর",
+          text: "ফোন নম্বর অবশ্যই 01 দিয়ে শুরু এবং সঠিক ১১ ডিজিট হতে হবে।",
+          confirmButtonColor: "#D48B80",
+        });
+        return;
+      }
+
+      const apiUrl = (
+        process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000"
+      ).replace(/\/+$/, "");
+
+      // Step 1: Check if Customer already exists by email
+      let targetCustomerId = customerId;
+
+      if (!targetCustomerId && emailToUse) {
+        try {
+          const customerRes = await fetch(
+            `${apiUrl}/api/customer/email/${encodeURIComponent(emailToUse)}`,
+          );
+          const customerData = await customerRes.json();
+
+          if (
+            customerRes.ok &&
+            customerData &&
+            customerData.success &&
+            customerData.data
+          ) {
+            targetCustomerId = customerData.data.id;
+          } else if (customerRes.ok && customerData && customerData.id) {
+            targetCustomerId = customerData.id;
+          }
+        } catch (e) {
+          console.log("Customer lookup failed, creating new record");
+        }
+      }
+
+      // Step 2: Create a new Customer record if not found
+      if (!targetCustomerId) {
+        const createCustomerRes = await fetch(`${apiUrl}/api/customer`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            fullName: recipientName || "Guest Customer",
+            email:
+              emailToUse ||
+              `guest_${cleanPhone || Date.now()}@glowkoreanbeautybd.com`,
+            phone: cleanPhone,
+            status: true,
+          }),
+        });
+
+        const createCustomerData = await createCustomerRes.json();
+
+        if (
+          createCustomerRes.ok &&
+          (createCustomerData.data?.id || createCustomerData.id)
+        ) {
+          targetCustomerId =
+            createCustomerData.data?.id || createCustomerData.id;
+        } else if (
+          createCustomerData.message?.includes("already exists") ||
+          createCustomerRes.status === 409
+        ) {
+          targetCustomerId =
+            createCustomerData.data?.id ||
+            createCustomerData.id ||
+            createCustomerData.customer?.id;
+        }
+
+        if (!targetCustomerId) {
+          throw new Error(
+            createCustomerData.message || "Failed to create customer record",
+          );
+        }
+      }
+
+      // Step 3: Add customer shipping address
+      const addressPayload = {
+        recipientName: recipientName,
+        phoneNumber: phoneNumber,
+        address: formData.address.trim(),
+        upazila: formData.upazila || "",
+        district: formData.district || "",
+        division: formData.division || "",
+        city: formData.city?.trim() || "",
+        postalCode: formData.postalCode?.trim() || "",
+        country: "Bangladesh",
+        isDefault: formData.isDefault !== undefined ? formData.isDefault : true,
+        type: formData.type || "Home",
+      };
+
+      const createAddressRes = await fetch(
+        `${apiUrl}/api/customer/${targetCustomerId}/addresses`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(addressPayload),
+        },
+      );
+
+      const createAddressData = await createAddressRes.json();
+      if (
+        !createAddressRes.ok &&
+        !createAddressData.data &&
+        !createAddressData.id
+      ) {
+        throw new Error(
+          createAddressData.message || "Failed to create shipping address",
+        );
+      }
+
+      const newAddressId =
+        createAddressData.data?.id ||
+        createAddressData.id ||
+        createAddressData.addressId;
+
+      const checkoutData = {
+        customerId: targetCustomerId,
+        customerAddressId: newAddressId,
+        email: emailToUse,
+        phoneNumber: cleanPhone,
+        recipientName: recipientName,
+        address: formData.address || "",
+        district: formData.district || "",
+        note: formData.note || "",
+        shippingMethod: formData.shipping || "dhaka-city",
+        paymentMethod: formData.payment || "cod",
+      };
+
+      await onCheckoutSubmit(checkoutData);
+    } catch (error) {
+      console.error("Checkout error:", error);
+      if (setLoading) setLoading(false);
+      Swal.fire({
+        icon: "error",
+        title: "Error",
+        text: error.message || "Failed to process checkout",
+        confirmButtonColor: "#D48B80",
+      });
+    }
+  };
+
+  const scrollToFirstError = (formErrors) => {
+    if (!formErrors) return;
+    const errorKeys = Object.keys(formErrors);
+    if (errorKeys.length > 0) {
+      const firstKey = errorKeys[0];
+      const errorElement = document.querySelector(
+        `[name="${firstKey}"], #${firstKey}`,
+      );
+      if (errorElement) {
+        errorElement.scrollIntoView({ behavior: "smooth", block: "center" });
+        setTimeout(() => {
+          try {
+            errorElement.focus();
+          } catch (e) {}
+        }, 300);
+      }
+    }
+  };
+
+  // Assign placeOrderRef handler for OrderSummary's Place Order button
+  if (placeOrderRef) {
+    placeOrderRef.current = () => {
+      if (setLoading) setLoading(true);
+      if (
+        user &&
+        customerId &&
+        addresses.length > 0 &&
+        selectedAddress &&
+        !isAddingNewAddress
+      ) {
+        handlePlaceOrder();
+      } else {
+        handleSubmit(handleSaveAndCheckout, (formErrors) => {
+          if (setLoading) setLoading(false);
+          scrollToFirstError(formErrors);
+        })();
+      }
+    };
+  }
+
+  const renderPrice = (price) => {
+    if (price === null || price === undefined)
+      return (
+        <span>
+          <span className="font-black">৳</span>0
+        </span>
+      );
+    const priceNumber = parseFloat(price);
+    if (isNaN(priceNumber))
+      return (
+        <span>
+          <span className="font-black">৳</span>0
+        </span>
+      );
+    const ceilPrice = Math.ceil(priceNumber);
+    return (
+      <span>
+        <span className="font-black">৳</span>
+        {ceilPrice.toLocaleString("en-BD", {
+          minimumFractionDigits: 0,
+          maximumFractionDigits: 0,
+        })}
+      </span>
+    );
+  };
+
+  // Calculate dynamic delivery charges
+  const deliveryCharges =
+    externalDeliveryCharges || calculateDeliveryCharges(cartItems);
+
+  // Render shipping and payment options (common for both flows)
+  const renderShippingAndPayment = () => {
+    const currentShipping = watchShipping || "dhaka-city";
+    return (
+      <>
+        {/* Shipping Method */}
+        <div className="mb-6">
+          <p className="font-medium text-xs md:text-base mb-2 md:mb-3 flex items-center gap-2 text-gray-900">
+            <Truck size={17} className="text-[#D48B80]" />
+            <span>Shipping Method</span>
+          </p>
+          <div className="grid grid-cols-2 gap-2 md:gap-3">
+            <label
+              className={`flex items-center gap-2 p-2.5 md:p-3 border rounded-[8px] cursor-pointer transition-all text-xs md:text-sm ${
+                currentShipping === "dhaka-city"
+                  ? "border-[#D48B80] bg-[#D48B80]/5 font-semibold text-gray-900 shadow-xs"
+                  : "border-gray-200 hover:bg-gray-50 text-gray-700"
+              }`}
+            >
+              <input
+                type="radio"
+                value="dhaka-city"
+                {...register("shipping")}
+                className="h-3.5 w-3.5 md:h-4 md:w-4 text-[#D48B80] accent-[#D48B80] shrink-0"
+              />
+              <div className="flex-1 min-w-0">
+                <p className="font-medium truncate">Dhaka City</p>
+              </div>
+              <p className="font-semibold text-xs md:text-sm shrink-0 text-[#D48B80]">
+                {deliveryCharges.insideDhaka === 0
+                  ? "Free"
+                  : renderPrice(deliveryCharges.insideDhaka)}
+              </p>
+            </label>
+            <label
+              className={`flex items-center gap-2 p-2.5 md:p-3 border rounded-[8px] cursor-pointer transition-all text-xs md:text-sm ${
+                currentShipping === "outside"
+                  ? "border-[#D48B80] bg-[#D48B80]/5 font-semibold text-gray-900 shadow-xs"
+                  : "border-gray-200 hover:bg-gray-50 text-gray-700"
+              }`}
+            >
+              <input
+                type="radio"
+                value="outside"
+                {...register("shipping")}
+                className="h-3.5 w-3.5 md:h-4 md:w-4 text-[#D48B80] accent-[#D48B80] shrink-0"
+              />
+              <div className="flex-1 min-w-0">
+                <p className="font-medium truncate">Outside Dhaka</p>
+              </div>
+              <p className="font-semibold text-xs md:text-sm shrink-0 text-[#D48B80]">
+                {deliveryCharges.outsideDhaka === 0
+                  ? "Free"
+                  : renderPrice(deliveryCharges.outsideDhaka)}
+              </p>
+            </label>
+          </div>
+        </div>
+
+        {/* Payment Method */}
+        <div className="mb-6">
+          <p className="font-medium text-xs md:text-base mb-2 md:mb-3 flex items-center gap-2 text-gray-900">
+            <CreditCard size={17} className="text-[#D48B80]" />
+            <span>Payment Method</span>
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 md:gap-3">
+            {/* Cash on Delivery */}
+            <label
+              className={`flex items-center gap-2.5 p-3 border rounded-[8px] cursor-pointer transition-all text-xs md:text-sm ${
+                (watchPayment || "cod") === "cod"
+                  ? "border-[#D48B80] bg-[#D48B80]/5 font-semibold text-gray-900 shadow-xs"
+                  : "border-gray-200 hover:bg-gray-50 text-gray-700"
+              }`}
+            >
+              <input
+                type="radio"
+                value="cod"
+                {...register("payment")}
+                className="h-3.5 w-3.5 md:h-4 md:w-4 text-[#D48B80] accent-[#D48B80] shrink-0"
+                defaultChecked
+              />
+              <span className="text-xs md:text-sm text-gray-900 font-medium">
+                Cash on Delivery
+              </span>
+            </label>
+
+            {/* bKash Mobile Banking (Disabled) */}
+            <label
+              className="flex items-center justify-between gap-2.5 p-3 border border-gray-200 rounded-[8px] transition-all text-xs md:text-sm bg-gray-50 opacity-60 cursor-not-allowed select-none"
+              title="bKash payment is currently unavailable"
+            >
+              <div className="flex items-center gap-2">
+                <input
+                  type="radio"
+                  value="bkash"
+                  disabled
+                  className="h-3.5 w-3.5 md:h-4 md:w-4 text-gray-300 accent-gray-400 shrink-0 cursor-not-allowed"
+                />
+                <span className="text-xs md:text-sm text-gray-500 font-medium">
+                  bKash
+                </span>
+              </div>
+              <span className="text-[10px] text-gray-400 font-medium bg-gray-200/70 px-1.5 py-0.5 rounded">
+                Unavailable
+              </span>
+            </label>
+
+            {/* Nagad Mobile Banking (Disabled) */}
+            <label
+              className="flex items-center justify-between gap-2.5 p-3 border border-gray-200 rounded-[8px] transition-all text-xs md:text-sm bg-gray-50 opacity-60 cursor-not-allowed select-none"
+              title="Nagad payment is currently unavailable"
+            >
+              <div className="flex items-center gap-2">
+                <input
+                  type="radio"
+                  value="nagad"
+                  disabled
+                  className="h-3.5 w-3.5 md:h-4 md:w-4 text-gray-300 accent-gray-400 shrink-0 cursor-not-allowed"
+                />
+                <span className="text-xs md:text-sm text-gray-500 font-medium">
+                  Nagad
+                </span>
+              </div>
+              <span className="text-[10px] text-gray-400 font-medium bg-gray-200/70 px-1.5 py-0.5 rounded">
+                Unavailable
+              </span>
+            </label>
+          </div>
+        </div>
+
+        {/* Order Notes */}
+        <div className="mb-6">
+          <label className="block mb-1 font-medium text-xs md:text-sm text-gray-900 flex items-center gap-1.5">
+            <FileText size={15} className="text-[#D48B80]" />
+            <span>Order Notes (Optional)</span>
+          </label>
+          <textarea
+            {...register("note")}
+            placeholder="Special instructions for delivery, landmark, or timing..."
+            className="w-full text-xs md:text-sm px-3 md:px-4 py-2 border border-gray-200 rounded-[8px] focus:outline-none focus:ring-1 focus:ring-[#D48B80] focus:border-[#D48B80] transition-all h-24 bg-white"
+            rows={3}
+          />
+        </div>
+      </>
+    );
+  };
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#D48B80]"></div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <h2 className="text-lg md:text-2xl font-bold mb-4 md:mb-6 text-gray-900">
+        Shipping Address
+      </h2>
+
+      {/* User Info Display */}
+      {effectiveUser && (
+        <div className="mb-6 p-4 bg-white border border-gray-200 rounded-xl shadow-xs">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="font-semibold text-gray-900">
+                Logged in as:{" "}
+                {effectiveUser.fullName ||
+                  effectiveUser.user_metadata?.full_name ||
+                  "User"}
+              </p>
+              <p className="text-sm text-gray-600">{effectiveUser.email}</p>
+            </div>
+            <Link
+              href="/my-account"
+              className="text-sm text-[#D48B80] hover:underline font-medium"
+            >
+              My Account
+            </Link>
+          </div>
+        </div>
+      )}
+
+      {/* Address Book View - When user has saved addresses */}
+      {effectiveUser &&
+      customerId &&
+      addresses.length > 0 &&
+      !isAddingNewAddress ? (
+        <div className="space-y-6">
+          {/* Selected Address Display */}
+          <div className="bg-white border border-gray-200 rounded-2xl p-5 shadow-xs">
+            <div className="flex items-start justify-between mb-3">
+              <h3 className="text-md font-bold text-gray-800">
+                Selected Shipping Address
+              </h3>
+              <button
+                type="button"
+                onClick={() => setShowAllAddresses(true)}
+                className="text-sm text-[#D48B80] hover:underline font-medium flex items-center gap-1"
+              >
+                Change Address <FaLongArrowAltRight className="text-xs" />
+              </button>
+            </div>
+            {selectedAddress &&
+              addresses.find((a) => a.id === selectedAddress) && (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <p className="text-gray-900 font-semibold">
+                      {
+                        addresses.find((a) => a.id === selectedAddress)
+                          .recipientName
+                      }
+                    </p>
+                  </div>
+                  <p className="text-gray-700">
+                    📞{" "}
+                    {
+                      addresses.find((a) => a.id === selectedAddress)
+                        .phoneNumber
+                    }
+                  </p>
+                  <p className="text-gray-600 text-sm">
+                    📍 {addresses.find((a) => a.id === selectedAddress).address}
+                  </p>
+                  {(() => {
+                    const sel = addresses.find((a) => a.id === selectedAddress);
+                    const cityUpazila = [sel.upazila, sel.district]
+                      .filter(Boolean)
+                      .join(", ");
+                    return (
+                      <>
+                        {cityUpazila && (
+                          <p className="text-gray-600 text-sm">{cityUpazila}</p>
+                        )}
+                        {sel.division && sel.division !== sel.district && (
+                          <p className="text-gray-600 text-sm">
+                            {sel.division}
+                          </p>
+                        )}
+                      </>
+                    );
+                  })()}
+                  <div className="inline-flex items-center gap-2 px-2.5 py-0.5 bg-gray-100 rounded-full text-xs">
+                    {getIcon(
+                      addresses.find((a) => a.id === selectedAddress).type,
+                    )}
+                    <span className="text-gray-700 font-semibold">
+                      {addresses.find((a) => a.id === selectedAddress).type}
+                    </span>
+                  </div>
+                </div>
+              )}
+          </div>
+
+          {/* Add Address Button */}
+          <div className="flex gap-3">
+            <button
+              type="button"
+              onClick={() => setIsAddingNewAddress(true)}
+              className="flex items-center gap-2 px-4 py-2 text-[#D48B80] border border-[#D48B80] rounded-[8px] hover:bg-[#D48B80]/5 transition-colors font-medium cursor-pointer text-sm"
+            >
+              <Plus className="w-4 h-4" />
+              Add New Address
+            </button>
+            {addresses.length > 1 && (
+              <button
+                type="button"
+                onClick={() => setShowAllAddresses(true)}
+                className="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 border border-gray-200 rounded-[8px] hover:bg-gray-200 transition-colors font-medium cursor-pointer text-sm"
+              >
+                View All Addresses <FaLongArrowAltRight />
+              </button>
+            )}
+          </div>
+
+          {/* Shipping and Payment Options */}
+          {renderShippingAndPayment()}
+        </div>
+      ) : (
+        <form
+          onSubmit={handleSubmit(handleSaveAndCheckout, (formErrors) => {
+            if (setLoading) setLoading(false);
+            scrollToFirstError(formErrors);
+          })}
+          className="bg-white border border-gray-200 rounded-2xl p-4 md:p-6 shadow-xs"
+        >
+          <div className="space-y-4 mb-6">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-semibold text-base md:text-lg text-gray-900 flex items-center gap-2">
+                <MapPin size={18} className="text-[#D48B80]" />
+                <span>
+                  {effectiveUser
+                    ? addresses.length > 0
+                      ? "Add New Shipping Address"
+                      : "Shipping Address"
+                    : "Guest Shipping Details"}
+                </span>
+              </h3>
+              {!effectiveUser && (
+                <Link
+                  href="/login"
+                  className="text-xs text-[#D48B80] hover:underline font-semibold cursor-pointer"
+                >
+                  Already have an account? Log In
+                </Link>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 md:gap-4 text-gray-900">
+              <div>
+                <label className="block mb-1 text-xs md:text-sm font-medium text-gray-900">
+                  Recipient Name <span className="text-red-500">*</span>
+                </label>
+                <input
+                  {...register("recipientName", {
+                    required: "Recipient Name is required",
+                    minLength: { value: 2, message: "At least 2 characters" },
+                  })}
+                  placeholder="Full Name"
+                  className="w-full text-xs md:text-sm placeholder:text-xs md:placeholder:text-sm px-3 md:px-4 py-2.5 h-10 md:h-11 border border-gray-200 rounded-[8px] focus:outline-none focus:ring-1 focus:ring-[#D48B80] focus:border-[#D48B80] transition-all bg-white text-gray-900"
+                />
+                {errors.recipientName && (
+                  <p className="text-red-500 text-xs md:text-sm mt-1">
+                    {errors.recipientName.message}
+                  </p>
+                )}
+              </div>
+              <div>
+                <label className="block mb-1 text-xs md:text-sm font-medium text-gray-900">
+                  Phone Number <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="tel"
+                  maxLength={11}
+                  {...register("phoneNumber", {
+                    required: "ফোন নম্বর আবশ্যক",
+                    validate: (val) => {
+                      const clean = (val || "").replace(/\D/g, "");
+                      if (!clean.startsWith("01")) {
+                        return "ফোন নম্বর 01 দিয়ে শুরু হতে হবে";
+                      }
+                      if (clean.length !== 11) {
+                        return "ফোন নম্বর অবশ্যই ১১ ডিজিটের হতে হবে";
+                      }
+                      return true;
+                    },
+                  })}
+                  onInput={(e) => {
+                    // Only allow numbers and limit to 11 digits
+                    let val = e.target.value.replace(/\D/g, "").slice(0, 11);
+                    e.target.value = val;
+                  }}
+                  placeholder="01XXXXXXXXX"
+                  className="w-full text-xs md:text-sm placeholder:text-xs md:placeholder:text-sm px-3 md:px-4 py-2.5 h-10 md:h-11 border border-gray-200 rounded-[8px] focus:outline-none focus:ring-1 focus:ring-[#D48B80] focus:border-[#D48B80] transition-all bg-white text-gray-900"
+                />
+                {errors.phoneNumber && (
+                  <p className="text-red-500 text-xs md:text-sm mt-1">
+                    {errors.phoneNumber.message}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div>
+              <label className="block mb-1 font-medium text-xs md:text-sm text-gray-900">
+                Address Type
+              </label>
+              <div className="grid grid-cols-3 gap-1.5 h-10 md:h-11">
+                {[
+                  { value: "Home", label: "Home", icon: Home },
+                  { value: "Office", label: "Office", icon: Briefcase },
+                  { value: "Other", label: "Other", icon: MapPin },
+                ].map(({ value, label, icon: Icon }) => {
+                  const isSelected = (watchType || "Home") === value;
+                  return (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() =>
+                        setValue("type", value, { shouldDirty: true })
+                      }
+                      className={`flex items-center justify-center gap-1.5 px-2 py-2 rounded-[8px] border text-xs md:text-sm transition-all cursor-pointer ${
+                        isSelected
+                          ? "border-[#D48B80] bg-[#D48B80]/10 text-[#D48B80] font-bold shadow-xs"
+                          : "border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
+                      }`}
+                    >
+                      <Icon
+                        size={14}
+                        className={
+                          isSelected ? "text-[#D48B80]" : "text-gray-400"
+                        }
+                      />
+                      <span>{label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-4 mb-6">
+            <input type="hidden" {...register("country")} value="Bangladesh" />
+            <input
+              type="hidden"
+              {...register("division")}
+              value={watchDivision || ""}
+            />
+            <input
+              type="hidden"
+              {...register("district")}
+              value={watchDistrict || ""}
+            />
+            <input
+              type="hidden"
+              {...register("upazila")}
+              value={watchUpazila || ""}
+            />
+
+            <div>
+              <label className="block mb-1 font-medium text-xs md:text-sm text-gray-900">
+                Full Street Address (সম্পূর্ণ ঠিকানা){" "}
+                <span className="text-red-500">*</span>
+              </label>
+              <textarea
+                {...register("address", {
+                  required: "Address is required",
+                  minLength: {
+                    value: 6,
+                    message: "Please provide a detailed street address",
+                  },
+                })}
+                placeholder="বাসা/হোল্ডিং নম্বর, রোড/সেক্টর, থানা, জেলা (e.g. Block #D, Road #2, Sector #10, House #15, Uttara, Dhaka)"
+                className="w-full text-xs md:text-sm placeholder:text-xs md:placeholder:text-sm px-3 md:px-4 py-2.5 border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-[#D48B80] focus:border-[#D48B80] transition-all h-20 md:h-24 bg-white text-gray-900"
+                rows={3}
+              />
+              {errors.address && (
+                <p className="text-red-500 text-xs md:text-sm mt-1">
+                  {errors.address.message}
+                </p>
+              )}
+            </div>
+
+            {user && customerId && (
+              <div className="flex items-center">
+                <input
+                  type="checkbox"
+                  {...register("isDefault")}
+                  className="h-4 w-4 text-[#D48B80] accent-[#D48B80] rounded"
+                  defaultChecked={addresses.length === 0}
+                />
+                <label className="ml-2 text-xs md:text-sm text-gray-700">
+                  Set as default shipping address
+                </label>
+              </div>
+            )}
+          </div>
+
+          {/* Shipping and Payment Options in Form */}
+          {renderShippingAndPayment()}
+        </form>
+      )}
+
+      {/* Modal for existing address showing */}
+      {showAllAddresses && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="p-6">
+              <div className="flex justify-between items-center mb-6 pb-4 border-b border-gray-100">
+                <h2 className="text-2xl font-bold text-gray-800">
+                  Select Shipping Address
+                </h2>
+                <button
+                  onClick={() => setShowAllAddresses(false)}
+                  className="p-2 hover:bg-gray-100 rounded-full transition-colors"
+                >
+                  <X className="w-5 h-5 text-gray-500" />
+                </button>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {addresses.map((address) => {
+                  const isSelected = selectedAddress === address.id;
+                  return (
+                    <div
+                      key={address.id}
+                      className={`relative bg-white rounded-xl border-2 transition-all duration-300 cursor-pointer hover:shadow-md ${
+                        isSelected
+                          ? "border-[#D48B80] shadow-md"
+                          : "border-gray-200 hover:border-[#D48B80]/40"
+                      }`}
+                      onClick={() => handleAddressSelect(address)}
+                    >
+                      {address.isDefault && (
+                        <div className="absolute -top-2.5 left-4 px-3 py-0.5 bg-gradient-to-r from-[#D48B80] to-[#BF756A] text-white text-[11px] font-bold rounded-full shadow-sm flex items-center gap-1">
+                          <Star className="w-3 h-3 fill-current" /> DEFAULT
+                        </div>
+                      )}
+                      <div className="p-5 space-y-2.5">
+                        <div className="flex items-center gap-2">
+                          {getIcon(address.type)}
+                          <span className="font-bold text-gray-900 text-sm">
+                            {address.type}
+                          </span>
+                        </div>
+                        <div>
+                          <p className="font-semibold text-gray-900 text-sm">
+                            {address.recipientName}
+                          </p>
+                          <p className="text-gray-700 text-xs">
+                            📞 {address.phoneNumber}
+                          </p>
+                        </div>
+                        <div className="text-xs text-gray-600 space-y-0.5">
+                          <p>{address.address}</p>
+                          {[address.upazila, address.district].filter(Boolean)
+                            .length > 0 && (
+                            <p>
+                              {[address.upazila, address.district]
+                                .filter(Boolean)
+                                .join(", ")}
+                            </p>
+                          )}
+                          {(address.division || address.postalCode) && (
+                            <p>
+                              {[address.division, address.postalCode]
+                                .filter(Boolean)
+                                .join(" - ")}
+                            </p>
+                          )}
+                        </div>
+                        <div className="flex items-center justify-center pt-2">
+                          <div
+                            className={`w-5 h-5 border-2 rounded-full flex items-center justify-center ${
+                              isSelected
+                                ? "border-[#D48B80] bg-[#D48B80]"
+                                : "border-gray-300"
+                            }`}
+                          >
+                            {isSelected && (
+                              <div className="w-2 h-2 bg-white rounded-full"></div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="mt-6 flex gap-3">
+                <button
+                  onClick={() => setShowAllAddresses(false)}
+                  disabled={!selectedAddress}
+                  className="flex-1 py-3 bg-[#D48B80] hover:bg-[#BF756A] text-white rounded-xl font-bold transition-colors disabled:opacity-50"
+                >
+                  Use Selected Address
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default BillingDetails;

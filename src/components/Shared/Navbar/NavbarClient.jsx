@@ -1,0 +1,613 @@
+"use client";
+
+import { useState, useEffect, useRef, useCallback } from "react";
+import Link from "next/link";
+import Image from "next/image";
+import { usePathname } from "next/navigation";
+import {
+  Menu,
+  X,
+  ShoppingCart,
+  Heart,
+  User,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Layers,
+  ArrowRight,
+  MapPin,
+  Truck,
+  HelpCircle,
+  Sparkles,
+} from "lucide-react";
+import TopHeader from "./TopHeader";
+import SearchBar from "./SearchBar";
+import { useCategories, useContact, useStoreSettings } from "@/lib/dataFetch";
+import { useUser } from "@/hooks/useUser";
+import { useCart } from "@/hooks/useCart";
+import { useWishlist } from "@/hooks/useWishlist";
+import { useCartDrawer } from "@/context/CartDrawerContext";
+
+export default function NavbarClient({
+  categories: initialCategories = [],
+  contactData: initialContact = null,
+}) {
+  const pathname = usePathname();
+  const { user, getDisplayName, getUserInitials, getUserEmail } = useUser();
+  const [isScrolled, setIsScrolled] = useState(false);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [isCategoryDropdownOpen, setIsCategoryDropdownOpen] = useState(false);
+  const [activeHoverCategory, setActiveHoverCategory] = useState(null);
+  const dropdownRef = useRef(null);
+
+  // Live SWR updates on tab focus / interval without manual page refresh
+  const { categories } = useCategories(initialCategories);
+  const { contactData } = useContact(initialContact);
+  const { storeSettings } = useStoreSettings();
+  const { getCartCount } = useCart();
+  const { getWishlistCount } = useWishlist();
+  const { openCartDrawer } = useCartDrawer();
+
+  const cartCount = getCartCount();
+  const wishlistCount = getWishlistCount();
+
+  // Scroll state for sticky shadow
+  useEffect(() => {
+    const handleScroll = () => {
+      if (window.scrollY > 20) {
+        setIsScrolled(true);
+      } else {
+        setIsScrolled(false);
+      }
+    };
+    window.addEventListener("scroll", handleScroll);
+    return () => window.removeEventListener("scroll", handleScroll);
+  }, []);
+
+  // Close mobile menu on route change
+  useEffect(() => {
+    setIsMobileMenuOpen(false);
+    setIsCategoryDropdownOpen(false);
+  }, [pathname]);
+
+  // Close category dropdown on outside click
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target)) {
+        setIsCategoryDropdownOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  // Filter only active categories for customer-facing display
+  const activeCategories = (categories || []).filter((cat) => cat.status !== false);
+
+  // Active category for preview in mega dropdown
+  const currentCategory = activeHoverCategory || activeCategories[0] || null;
+
+  // Categories to show in the horizontal category bar
+  const categoryBarItems = activeCategories;
+
+  // Horizontal scroll state & ref for category carousel
+  const categoryScrollRef = useRef(null);
+  const [canScrollLeft, setCanScrollLeft] = useState(false);
+  const [canScrollRight, setCanScrollRight] = useState(false);
+
+  const checkCategoryScroll = useCallback(() => {
+    const el = categoryScrollRef.current;
+    if (!el) return;
+    const { scrollLeft, scrollWidth, clientWidth } = el;
+    setCanScrollLeft(scrollLeft > 4);
+    setCanScrollRight(scrollLeft + clientWidth < scrollWidth - 4);
+  }, []);
+
+  useEffect(() => {
+    checkCategoryScroll();
+    const el = categoryScrollRef.current;
+    if (!el) return;
+    el.addEventListener("scroll", checkCategoryScroll, { passive: true });
+    window.addEventListener("resize", checkCategoryScroll);
+    return () => {
+      el.removeEventListener("scroll", checkCategoryScroll);
+      window.removeEventListener("resize", checkCategoryScroll);
+    };
+  }, [categoryBarItems, checkCategoryScroll]);
+
+  const handleScrollCategories = (direction) => {
+    const el = categoryScrollRef.current;
+    if (!el) return;
+    const scrollAmount = 240;
+    el.scrollBy({
+      left: direction === "left" ? -scrollAmount : scrollAmount,
+      behavior: "smooth",
+    });
+  };
+
+  return (
+    <>
+      {/* 1. Top Header (Static, scrolls off screen) */}
+      <TopHeader contactData={contactData} />
+
+      {/* 2. Full Navbar Client (Sticky to top of viewport) */}
+      <header className="sticky top-0 z-50 w-full bg-white shadow-xs">
+        {/* Main Middle Navigation Bar */}
+        <div
+          className={`transition-all duration-200 border-b border-slate-100 ${isScrolled ? "py-2 sm:py-2.5 bg-white/95 backdrop-blur-md " : "py-2 sm:py-3 bg-white"}`}
+        >
+          <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 flex items-center justify-between gap-2 sm:gap-4 md:gap-8">
+            {/* Left: Mobile Menu Toggle & Brand Logo */}
+            <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
+              <button
+                type="button"
+                onClick={() => setIsMobileMenuOpen((prev) => !prev)}
+                className="lg:hidden p-1.5 sm:p-2 text-slate-800 hover:bg-slate-100 rounded-lg transition cursor-pointer"
+                aria-label="Toggle menu"
+              >
+                {isMobileMenuOpen ? <X size={20} /> : <Menu size={20} />}
+              </button>
+
+              <Link href="/" className="flex items-center gap-1.5 group">
+                <div
+                  className={`relative transition-all ${
+                    storeSettings?.navbarLogoBg
+                      ? "w-28 sm:w-44 h-8 sm:h-12 bg-white p-1 rounded-lg shadow-2xs border border-slate-100 flex items-center justify-center"
+                      : "w-28 sm:w-48 h-8 sm:h-12 bg-transparent flex items-center justify-start"
+                  }`}
+                >
+                  <Image
+                    src={storeSettings?.logo || "/juniormaster-logo.png"}
+                    alt="Junior Master"
+                    fill
+                    priority
+                    className={`object-contain transition-transform duration-200 group-hover:scale-[1.02] ${
+                      storeSettings?.navbarLogoBg
+                        ? "object-center"
+                        : "object-left"
+                    }`}
+                  />
+                </div>
+              </Link>
+            </div>
+
+            {/* Center: Search Bar with Collection Quick Pill on Left */}
+            <div className="flex-1 min-w-0 hidden md:flex items-center gap-2">
+              <Link
+                href="/collections"
+                className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-full bg-[#FAF7F2] hover:bg-[#F4ECE3] text-[#B88348] hover:text-[#9A6B34] border border-[#EDE5DC] text-xs font-bold transition-all shadow-2xs hover:shadow-xs group cursor-pointer"
+                title="Browse Curated Collections"
+              >
+                <Sparkles size={13} className="text-[#B88348] group-hover:rotate-12 transition-transform" />
+                <span className="hidden lg:inline">Collections</span>
+              </Link>
+              <div className="flex-1 min-w-0">
+                <SearchBar categories={activeCategories} />
+              </div>
+            </div>
+
+            {/* Right: Sign in, Wishlist, Cart Actions (Evaly aesthetic) */}
+            <div className="flex items-center gap-2.5 sm:gap-6 shrink-0">
+              {/* User / Sign in dynamic check */}
+              {user ? (
+                <div className="relative group/account">
+                  <Link
+                    href="/my-account"
+                    className="flex flex-col items-center justify-center text-slate-700 hover:text-primary transition cursor-pointer group"
+                  >
+                    <div className="w-5 h-5 rounded-full bg-primary text-white flex items-center justify-center text-[10px] font-bold">
+                      {getUserInitials()}
+                    </div>
+                    <span className="text-[10px] sm:text-[11px] font-medium mt-0.5 max-w-[50px] sm:max-w-[60px] truncate">
+                      {getDisplayName()}
+                    </span>
+                  </Link>
+
+                  {/* Dropdown menu */}
+                  <div className="absolute right-0 top-full mt-2 w-48 bg-white border border-slate-200 rounded-xl shadow-xl py-2 opacity-0 invisible group-hover/account:opacity-100 group-hover/account:visible transition-all duration-200 z-50">
+                    <div className="px-4 py-2 border-b border-slate-100">
+                      <p className="text-[10px] text-slate-400">Signed in as</p>
+                      <p className="text-xs font-semibold text-slate-800 truncate">
+                        {getUserEmail()}
+                      </p>
+                    </div>
+                    <Link
+                      href="/my-account"
+                      className="block px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 hover:text-primary transition-colors"
+                    >
+                      My Profile
+                    </Link>
+                    <Link
+                      href="/my-account/orders"
+                      className="block px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 hover:text-primary transition-colors"
+                    >
+                      My Orders
+                    </Link>
+                    <Link
+                      href="/my-account/address-book"
+                      className="block px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 hover:text-primary transition-colors"
+                    >
+                      Address Book
+                    </Link>
+                    <Link
+                      href="/track-order"
+                      className="block px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 hover:text-primary transition-colors"
+                    >
+                      Track Order
+                    </Link>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const { logout } = await import("@/lib/auth-helpers");
+                        await logout();
+                        window.location.href = "/login";
+                      }}
+                      className="w-full text-left px-4 py-2 text-xs font-medium text-red-600 hover:bg-slate-50 transition-colors border-t border-slate-100 mt-1 pt-2 cursor-pointer"
+                    >
+                      Logout
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <Link
+                  href="/login"
+                  className="flex flex-col items-center justify-center text-slate-700 hover:text-primary transition cursor-pointer group"
+                >
+                  <User
+                    size={19}
+                    strokeWidth={1.8}
+                    className="group-hover:scale-110 transition-transform"
+                  />
+                  <span className="text-[10px] sm:text-[11px] font-medium mt-0.5">
+                    Sign in
+                  </span>
+                </Link>
+              )}
+
+              {/* Wishlist */}
+              <Link
+                href="/wishlist"
+                className="relative flex flex-col items-center justify-center text-slate-700 hover:text-primary transition cursor-pointer group"
+              >
+                <div className="relative">
+                  <Heart
+                    size={19}
+                    strokeWidth={1.8}
+                    className="group-hover:scale-110 transition-transform"
+                  />
+                  {wishlistCount > 0 && (
+                    <span className="absolute -top-1.5 -right-2 w-4 h-4 bg-[#E11D48] text-white text-[9px] font-bold rounded-full flex items-center justify-center shadow-xs">
+                      {wishlistCount}
+                    </span>
+                  )}
+                </div>
+                <span className="text-[10px] sm:text-[11px] font-medium mt-0.5">Wishlist</span>
+              </Link>
+
+              {/* Cart Button triggering Cart Slider */}
+              <button
+                type="button"
+                onClick={openCartDrawer}
+                className="relative flex flex-col items-center justify-center text-slate-700 hover:text-primary transition cursor-pointer group"
+              >
+                <div className="relative">
+                  <ShoppingCart
+                    size={19}
+                    strokeWidth={1.8}
+                    className="group-hover:scale-110 transition-transform"
+                  />
+                  {cartCount > 0 && (
+                    <span className="absolute -top-1.5 -right-2 w-4 h-4 bg-primary text-white text-[9px] font-bold rounded-full flex items-center justify-center shadow-xs">
+                      {cartCount}
+                    </span>
+                  )}
+                </div>
+                <span className="text-[10px] sm:text-[11px] font-medium mt-0.5">Cart</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Mobile Search Bar Row */}
+          <div className="px-3 pt-2 pb-1 md:hidden">
+            <SearchBar categories={activeCategories} />
+          </div>
+        </div>
+
+        {/* 3. Bottom Category Strip (Evaly-style: [ = All Categories v ] + Category Links) */}
+        <div className="border-b border-slate-200/90 bg-white hidden lg:block">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center gap-4">
+            {/* All Categories Button with Rounded Dark Pill */}
+            <div ref={dropdownRef} className="relative py-2.5">
+              <button
+                type="button"
+                onClick={() =>
+                  setIsCategoryDropdownOpen(!isCategoryDropdownOpen)
+                }
+                onMouseEnter={() => setIsCategoryDropdownOpen(true)}
+                className="flex items-center gap-2.5 px-4 py-2 bg-primary hover:bg-primary/90 text-white text-xs font-medium rounded-md transition cursor-pointer shadow-xs"
+              >
+                <Menu size={16} className="text-white" />
+                <span>All Categories</span>
+                <ChevronDown
+                  size={14}
+                  className={`transition-transform duration-200 text-white ${isCategoryDropdownOpen ? "rotate-180" : ""}`}
+                />
+              </button>
+
+              {/* Mega Categories Dropdown */}
+              {isCategoryDropdownOpen && (
+                <div
+                  className="absolute top-full left-0 w-[720px] bg-white rounded-xl shadow-2xl border border-slate-200 flex overflow-hidden z-50 animate-in fade-in-50 duration-150"
+                  onMouseLeave={() => setIsCategoryDropdownOpen(false)}
+                >
+                  {/* Left: Categories list */}
+                  <div className="w-60 bg-slate-50 border-r border-slate-100 py-2 max-h-96 overflow-y-auto">
+                    {activeCategories.map((cat) => {
+                      const isHovered = currentCategory?.id === cat.id;
+                      return (
+                        <Link
+                          key={cat.id}
+                          href={`/product?category=${encodeURIComponent(cat.name)}`}
+                          onMouseEnter={() => setActiveHoverCategory(cat)}
+                          className={`flex items-center justify-between px-4 py-2.5 text-xs font-medium transition cursor-pointer ${
+                            isHovered
+                              ? "bg-white text-primary font-bold border-l-4 border-primary shadow-xs"
+                              : "text-slate-700 hover:text-primary hover:bg-white"
+                          }`}
+                        >
+                          <span className="truncate">{cat.name}</span>
+                          <ArrowRight
+                            size={12}
+                            className={`transition-transform ${isHovered ? "translate-x-1 opacity-100" : "opacity-30"}`}
+                          />
+                        </Link>
+                      );
+                    })}
+                  </div>
+
+                  {/* Right: Subcategories preview */}
+                  <div className="flex-1 p-5 max-h-96 overflow-y-auto">
+                    {currentCategory ? (
+                      <div className="space-y-4">
+                        <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                          <div>
+                            <h4 className="text-xs font-bold text-secound uppercase tracking-wider">
+                              {currentCategory.name}
+                            </h4>
+                            <p className="text-[11px] text-slate-400">
+                              Popular items and subcategories
+                            </p>
+                          </div>
+                          <Link
+                            href={`/product?category=${encodeURIComponent(currentCategory.name)}`}
+                            className="text-[11px] text-primary hover:underline font-semibold"
+                          >
+                            View All (
+                            {currentCategory.subCategories?.length || 0}) →
+                          </Link>
+                        </div>
+
+                        {currentCategory.subCategories &&
+                        currentCategory.subCategories.length > 0 ? (
+                          <div className="grid grid-cols-2 gap-2">
+                            {currentCategory.subCategories.map((sub) => (
+                              <Link
+                                key={sub.id}
+                                href={`/product?subCategory=${encodeURIComponent(sub.name)}`}
+                                className="p-2 rounded-lg hover:bg-slate-50 text-xs font-medium text-slate-600 hover:text-primary transition flex items-center justify-between group"
+                              >
+                                <span className="truncate">{sub.name}</span>
+                                <span className="text-[10px] text-slate-300 group-hover:text-primary">
+                                  →
+                                </span>
+                              </Link>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-xs text-slate-400 py-6 text-center">
+                            No subcategories under {currentCategory.name}
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-slate-400 text-center py-8">
+                        Select a category to view items
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Category Links Carousel with Dynamic Overflow Arrows */}
+            <div className="relative flex-1 min-w-0 flex items-center">
+              {/* Left Scroll Arrow (Only visible when scrolled right) */}
+              {canScrollLeft && (
+                <div className="absolute left-0 top-1/2 -translate-y-1/2 z-10 flex items-center pr-4 bg-gradient-to-r from-white via-white to-transparent h-full">
+                  <button
+                    type="button"
+                    onClick={() => handleScrollCategories("left")}
+                    className="w-7 h-7 rounded-full bg-white hover:bg-slate-50 border border-slate-200/90 shadow-md flex items-center justify-center text-slate-700 hover:text-primary transition-all duration-150 cursor-pointer hover:scale-105 active:scale-95"
+                    aria-label="Scroll categories left"
+                  >
+                    <ChevronLeft size={16} strokeWidth={2.5} />
+                  </button>
+                </div>
+              )}
+
+              {/* Scrollable Category Container */}
+              <div
+                ref={categoryScrollRef}
+                className="w-full flex items-center gap-1 overflow-x-auto hide-scrollbar py-1.5 scroll-smooth"
+              >
+                {categoryBarItems.length > 0 ? (
+                  categoryBarItems.map((cat) => (
+                    <Link
+                      key={cat.id || cat.name}
+                      href={`/product?category=${encodeURIComponent(cat.name)}`}
+                      className="whitespace-nowrap px-3.5 py-1.5 rounded-md text-xs font-normal text-slate-700 hover:text-slate-950 hover:bg-slate-100 transition-all duration-150 cursor-pointer shrink-0"
+                    >
+                      {cat.name}
+                    </Link>
+                  ))
+                ) : (
+                  <>
+                    <Link
+                      href="/product"
+                      className="whitespace-nowrap px-3.5 py-1.5 rounded-lg text-xs font-semibold text-slate-700 hover:text-slate-950 hover:bg-slate-100 transition-all duration-150 shrink-0"
+                    >
+                      Electronics & Gadget
+                    </Link>
+                    <Link
+                      href="/product"
+                      className="whitespace-nowrap px-3.5 py-1.5 rounded-lg text-xs font-semibold text-slate-700 hover:text-slate-950 hover:bg-slate-100 transition-all duration-150 shrink-0"
+                    >
+                      Fashion
+                    </Link>
+                    <Link
+                      href="/product"
+                      className="whitespace-nowrap px-3.5 py-1.5 rounded-lg text-xs font-semibold text-slate-700 hover:text-slate-950 hover:bg-slate-100 transition-all duration-150 shrink-0"
+                    >
+                      Appliances
+                    </Link>
+                    <Link
+                      href="/product"
+                      className="whitespace-nowrap px-3.5 py-1.5 rounded-lg text-xs font-semibold text-slate-700 hover:text-slate-950 hover:bg-slate-100 transition-all duration-150 shrink-0"
+                    >
+                      Mobiles & Tablets
+                    </Link>
+                    <Link
+                      href="/product"
+                      className="whitespace-nowrap px-3.5 py-1.5 rounded-lg text-xs font-semibold text-slate-700 hover:text-slate-950 hover:bg-slate-100 transition-all duration-150 shrink-0"
+                    >
+                      Kitchen & Dining
+                    </Link>
+                    <Link
+                      href="/product"
+                      className="whitespace-nowrap px-3.5 py-1.5 rounded-lg text-xs font-semibold text-slate-700 hover:text-slate-950 hover:bg-slate-100 transition-all duration-150 shrink-0"
+                    >
+                      Travel Accessories
+                    </Link>
+                    <Link
+                      href="/product"
+                      className="whitespace-nowrap px-3.5 py-1.5 rounded-lg text-xs font-semibold text-slate-700 hover:text-slate-950 hover:bg-slate-100 transition-all duration-150 shrink-0"
+                    >
+                      Bags & Luggage
+                    </Link>
+                    <Link
+                      href="/product"
+                      className="whitespace-nowrap px-3.5 py-1.5 rounded-lg text-xs font-semibold text-slate-700 hover:text-slate-950 hover:bg-slate-100 transition-all duration-150 shrink-0"
+                    >
+                      Personal Care
+                    </Link>
+                    <Link
+                      href="/product"
+                      className="whitespace-nowrap px-3.5 py-1.5 rounded-lg text-xs font-semibold text-slate-700 hover:text-slate-950 hover:bg-slate-100 transition-all duration-150 shrink-0"
+                    >
+                      Food & Grocery
+                    </Link>
+                  </>
+                )}
+              </div>
+
+              {/* Right Scroll Arrow (Only visible when items overflow to the right) */}
+              {canScrollRight && (
+                <div className="absolute right-0 top-1/2 -translate-y-1/2 z-10 flex items-center pl-4 bg-gradient-to-l from-white via-white to-transparent h-full">
+                  <button
+                    type="button"
+                    onClick={() => handleScrollCategories("right")}
+                    className="w-7 h-7 rounded-full bg-white hover:bg-slate-50 border border-slate-200/90 shadow-md flex items-center justify-center text-slate-700 hover:text-primary transition-all duration-150 cursor-pointer hover:scale-105 active:scale-95"
+                    aria-label="Scroll categories right"
+                  >
+                    <ChevronRight size={16} strokeWidth={2.5} />
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {/* 4. Mobile Navigation Drawer */}
+      {isMobileMenuOpen && (
+        <div className="fixed inset-0 z-50 lg:hidden">
+          <div
+            className="fixed inset-0 bg-black/50 backdrop-blur-xs transition-opacity"
+            onClick={() => setIsMobileMenuOpen(false)}
+          />
+
+          <div className="fixed inset-y-0 left-0 w-[85%] max-w-sm bg-white shadow-2xl flex flex-col z-50 overflow-hidden">
+            <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50">
+              <div className="relative w-32 h-9">
+                <Image
+                  src={storeSettings?.logo || "/glowbeauty.png"}
+                  alt="Glow Korean Beauty"
+                  fill
+                  className="object-contain object-left"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsMobileMenuOpen(false)}
+                className="p-1.5 text-slate-500 hover:text-slate-800 rounded-lg hover:bg-slate-200/60 transition cursor-pointer"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 space-y-6">
+              {/* Categories in Mobile Drawer */}
+              <div className="space-y-1">
+                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-3 mb-2 flex items-center gap-1.5">
+                  <Layers size={12} /> All Categories
+                </p>
+                {activeCategories.map((cat) => (
+                  <Link
+                    key={cat.id}
+                    href={`/product?category=${encodeURIComponent(cat.name)}`}
+                    onClick={() => setIsMobileMenuOpen(false)}
+                    className="flex items-center justify-between px-3 py-2 rounded-lg text-xs text-slate-700 hover:text-primary hover:bg-slate-50 transition"
+                  >
+                    <span>{cat.name}</span>
+                    <ArrowRight size={12} className="text-slate-300" />
+                  </Link>
+                ))}
+              </div>
+
+              {/* Utility Links */}
+              <div className="space-y-2 border-t border-slate-100 pt-4 text-xs font-medium text-slate-600">
+                <Link
+                  href="/track-order"
+                  onClick={() => setIsMobileMenuOpen(false)}
+                  className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-slate-50 text-slate-700"
+                >
+                  <Truck size={15} className="text-primary" />
+                  <span>Track Your Order</span>
+                </Link>
+                <Link
+                  href={user ? "/my-account" : "/login"}
+                  onClick={() => setIsMobileMenuOpen(false)}
+                  className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-slate-50 text-slate-700"
+                >
+                  <User size={15} className="text-primary" />
+                  <span>
+                    {user
+                      ? `My Account (${getDisplayName()})`
+                      : "Sign in / Create Account"}
+                  </span>
+                </Link>
+              </div>
+            </div>
+
+            <div className="p-4 bg-slate-50 border-t border-slate-100 text-xs text-center text-slate-500">
+              <p className="font-semibold text-slate-700">Need Help?</p>
+              <p className="font-mono text-primary font-bold mt-0.5">
+                {contactData?.phone_number || "01969968555"}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}

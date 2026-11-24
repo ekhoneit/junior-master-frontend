@@ -1,0 +1,854 @@
+// components/Checkout/CheckoutClient.jsx
+"use client";
+
+import Container from "@/components/Shared/Container";
+import Link from "next/link";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { useForm } from "react-hook-form";
+import toast from "react-hot-toast";
+import { IoIosArrowForward } from "react-icons/io";
+import { useRouter, useSearchParams } from "next/navigation";
+import Swal from "sweetalert2";
+import { FaShoppingBag } from "react-icons/fa";
+import { useCart } from "@/hooks/useCart";
+import { useCartDrawer } from "@/context/CartDrawerContext";
+import BillingDetails from "@/components/Checkout/BillingDetails";
+import OrderSummary from "@/components/Checkout/OrderSummary";
+import CheckoutOrderBump from "@/components/Checkout/CheckoutOrderBump";
+import { calculateDeliveryCharges } from "@/lib/deliveryCharge";
+import { getVariantDisplayLabel } from "@/lib/variantHelpers";
+import { useUser } from "@/hooks/useUser";
+import { 
+  trackBeginCheckout, 
+  trackAddShippingInfo, 
+  trackAddPaymentInfo, 
+  trackPurchase 
+} from "@/utils/dataLayer";
+
+// Standalone safe helper to guarantee variant label formatting never throws ReferenceError
+function safeVariantDisplayLabel(v) {
+  try {
+    if (typeof getVariantDisplayLabel === "function") {
+      const res = getVariantDisplayLabel(v);
+      if (res) return res;
+    }
+  } catch (_) {}
+  if (!v) return "";
+  if (v.attributes && typeof v.attributes === "object") {
+    const vals = Object.values(v.attributes).filter(Boolean);
+    if (vals.length > 0) return vals.join(" - ");
+  }
+  return [v.color, v.size].filter(Boolean).join(" - ") || "";
+}
+
+export default function CheckoutClient({ initialContact = null }) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const isDirectBuyNow = searchParams?.get("buyNow") === "true";
+  const { user } = useUser();
+  const { openCartDrawer } = useCartDrawer();
+  const {
+    cart,
+    loading: cartLoading,
+    getBuyNowItem,
+    clearBuyNowItem,
+    updateQuantity,
+    removeFromCart,
+    clearCart,
+  } = useCart();
+
+  const [loading, setLoading] = useState(false);
+  const [isBuyNow, setIsBuyNow] = useState(false);
+  const [checkoutItems, setCheckoutItems] = useState([]);
+  const [isLoaded, setIsLoaded] = useState(false);
+
+  // Dynamic delivery charges calculated directly from checkout items
+  const [deliveryCharges, setDeliveryCharges] = useState(() =>
+    calculateDeliveryCharges([])
+  );
+
+  useEffect(() => {
+    setDeliveryCharges(calculateDeliveryCharges(checkoutItems));
+  }, [checkoutItems]);
+
+  // Coupon state
+  const [appliedCoupon, setAppliedCoupon] = useState(null);
+  const [couponDiscount, setCouponDiscount] = useState(0);
+
+  // Order Bump state
+  const [includeBump, setIncludeBump] = useState(false);
+  const [selectedBumpVariant, setSelectedBumpVariant] = useState(null);
+
+  // Derive order bump configuration from the items in checkout
+  const bumpConfig = (() => {
+    for (const item of checkoutItems) {
+      const bumpProd = item.orderBumpProduct || item.product?.orderBumpProduct;
+      if (bumpProd && (bumpProd.id || bumpProd.productName)) {
+        return {
+          product: bumpProd,
+          title: item.orderBumpTitle || item.product?.orderBumpTitle || "স্পেশাল অ্যাড-অন অফার!",
+          subtitle: item.orderBumpSubtitle || item.product?.orderBumpSubtitle || "মূল পণ্যের সাথে একই পার্সেল ডেলিভারিতে পাচ্ছেন আকর্ষণীয় অতিরিক্ত ছাড়!",
+          discount: parseFloat(item.orderBumpDiscount ?? item.product?.orderBumpDiscount ?? 0),
+          price: item.orderBumpPrice !== null && item.orderBumpPrice !== undefined ? item.orderBumpPrice : item.product?.orderBumpPrice,
+        };
+      }
+    }
+    return null;
+  })();
+
+  // Synchronize initial bump variant when bumpConfig changes
+  useEffect(() => {
+    if (bumpConfig?.product?.productVariants?.length > 0) {
+      setSelectedBumpVariant((prev) => {
+        if (prev && bumpConfig.product.productVariants.some((v) => v.id === prev.id)) {
+          return prev;
+        }
+        return bumpConfig.product.productVariants[0];
+      });
+    } else {
+      setSelectedBumpVariant(null);
+    }
+  }, [bumpConfig?.product?.id]);
+
+  // Construct active bump item object if includeBump is true
+  const activeBumpItem = (includeBump && bumpConfig?.product) ? (() => {
+    const bProd = bumpConfig.product;
+    const v = selectedBumpVariant;
+    const hasConfiguredPrice =
+      bumpConfig.price !== null &&
+      bumpConfig.price !== undefined &&
+      !isNaN(parseFloat(bumpConfig.price)) &&
+      parseFloat(bumpConfig.price) > 0;
+
+    const basePrice = hasConfiguredPrice
+      ? parseFloat(bumpConfig.price)
+      : v?.price
+      ? parseFloat(v.price)
+      : parseFloat(bProd.salePrice || bProd.price || 0);
+
+    return {
+      id: bProd.id,
+      productId: bProd.id,
+      productName: bProd.productName,
+      price: basePrice,
+      originalPrice: parseFloat(v?.price || bProd.price || basePrice),
+      quantity: 1,
+      variantId: v?.id || null,
+      selectedVariant: v || null,
+      isOrderBump: true,
+    };
+  })() : null;
+
+  const bumpExtraDiscount = (includeBump && bumpConfig) ? parseFloat(bumpConfig.discount || 0) : 0;
+
+  // Place Order handler ref to prevent re-render state loops
+  const placeOrderRef = useRef(null);
+
+  const {
+    register,
+    handleSubmit,
+    setValue,
+    watch,
+    formState: { errors },
+  } = useForm({
+    defaultValues: {
+      shipping: "dhaka-city",
+      payment: "cod",
+    },
+  });
+
+  // Load checkout items (Buy Now vs Regular Cart)
+  useEffect(() => {
+    if (cartLoading) return;
+
+    const buyNow = getBuyNowItem();
+    // Only treat as Buy Now if explicitly direct buy now OR cart is completely empty
+    if (isDirectBuyNow && buyNow && (buyNow.productId || buyNow.id)) {
+      setIsBuyNow(true);
+      setCheckoutItems([buyNow]);
+      trackBeginCheckout([buyNow]);
+    } else {
+      // Cart checkout: load ALL items currently in the cart
+      setIsBuyNow(false);
+      const items = Array.isArray(cart) ? cart : [];
+      setCheckoutItems(items);
+      if (items.length > 0) {
+        trackBeginCheckout(items);
+      }
+    }
+    setIsLoaded(true);
+  }, [cartLoading, cart, getBuyNowItem, isDirectBuyNow]);
+
+  const getCheckoutTotal = useCallback(() => {
+    return checkoutItems.reduce((total, item) => {
+      const price = parseFloat(item.price || 0);
+      const qty = item.quantity || 1;
+      return total + price * qty;
+    }, 0);
+  }, [checkoutItems]);
+
+  const handleCouponApplied = useCallback((coupon, discount) => {
+    setAppliedCoupon(coupon);
+    setCouponDiscount(discount);
+  }, []);
+
+  const handleCouponRemoved = useCallback(() => {
+    setAppliedCoupon(null);
+    setCouponDiscount(0);
+  }, []);
+
+  // Handle removing item
+  const handleRemoveItem = useCallback(
+    (itemToRemove) => {
+      if (isBuyNow) {
+        clearBuyNowItem();
+        setCheckoutItems([]);
+        toast.success("Item removed from checkout");
+        return;
+      }
+
+      const index = checkoutItems.findIndex((item) => {
+        const itemRealId = item.productId || item.id;
+        const targetId = itemToRemove.productId || itemToRemove.id;
+        return (
+          itemRealId === targetId &&
+          (item.variantId || null) === (itemToRemove.variantId || null)
+        );
+      });
+
+      if (index > -1) {
+        removeFromCart(index);
+        setCheckoutItems((prev) => prev.filter((_, idx) => idx !== index));
+      }
+    },
+    [isBuyNow, clearBuyNowItem, checkoutItems, removeFromCart]
+  );
+
+  // Handle updating item quantity
+  const handleUpdateQuantity = useCallback(
+    (itemToUpdate, newQuantity) => {
+      const quantity = parseInt(newQuantity);
+      if (isNaN(quantity) || quantity < 1) {
+        return handleRemoveItem(itemToUpdate);
+      }
+
+      if (isBuyNow) {
+        const updated = { ...itemToUpdate, quantity };
+        setCheckoutItems([updated]);
+        try {
+          localStorage.setItem("glowbeauty_buy_now_item", JSON.stringify(updated));
+        } catch (_) {}
+        return;
+      }
+
+      const index = checkoutItems.findIndex((item) => {
+        const itemRealId = item.productId || item.id;
+        const targetId = itemToUpdate.productId || itemToUpdate.id;
+        return (
+          itemRealId === targetId &&
+          (item.variantId || null) === (itemToUpdate.variantId || null)
+        );
+      });
+
+      if (index > -1) {
+        updateQuantity(index, quantity);
+        setCheckoutItems((prev) =>
+          prev.map((item, idx) => (idx === index ? { ...item, quantity } : item))
+        );
+      }
+    },
+    [isBuyNow, checkoutItems, handleRemoveItem, updateQuantity]
+  );
+
+  // Handle switching variant directly inside checkout page
+  const handleSelectVariant = useCallback(
+    (currentItem, newVariant) => {
+      if (!newVariant) return;
+
+      const baseVariantSelling = newVariant.price != null ? parseFloat(newVariant.price) : parseFloat(currentItem.price || 0);
+      const baseVariantRegular = newVariant.regularPrice != null && parseFloat(newVariant.regularPrice) > 0
+        ? parseFloat(newVariant.regularPrice)
+        : (parseFloat(currentItem.originalPrice || currentItem.regularPrice || 0) > baseVariantSelling
+            ? parseFloat(currentItem.originalPrice || currentItem.regularPrice)
+            : baseVariantSelling);
+
+      const discountVal = parseFloat(currentItem.discountValue || 0);
+      let calculatedPrice = baseVariantSelling;
+
+      if (baseVariantRegular > baseVariantSelling) {
+        // Variant already has an explicit regularPrice higher than selling price
+        calculatedPrice = baseVariantSelling;
+      } else if (discountVal > 0) {
+        if (currentItem.discountType === "Fixed") {
+          calculatedPrice = Math.max(0, baseVariantRegular - discountVal);
+        } else {
+          const discAmt = (baseVariantRegular * discountVal) / 100;
+          calculatedPrice = Math.max(0, baseVariantRegular - discAmt);
+        }
+      }
+
+      const newDiscAmt = Math.max(0, baseVariantRegular - calculatedPrice);
+      const newStock = newVariant.stockQuantity ?? newVariant.quantity ?? currentItem.stockQuantity;
+
+      const updatedItem = {
+        ...currentItem,
+        variantId: newVariant.id,
+        variantAttributes: newVariant.attributes || newVariant.variantAttributes || null,
+        variantType: newVariant.title || newVariant.name || null,
+        sku: newVariant.sku || currentItem.sku,
+        price: calculatedPrice,
+        originalPrice: baseVariantRegular,
+        regularPrice: baseVariantRegular,
+        discountAmount: newDiscAmt,
+        stockQuantity: newStock,
+        image: newVariant.image || currentItem.image,
+        images: newVariant.image ? [newVariant.image] : currentItem.images,
+      };
+
+      if (isBuyNow) {
+        setCheckoutItems([updatedItem]);
+        try {
+          localStorage.setItem("glowbeauty_buy_now_item", JSON.stringify(updatedItem));
+        } catch (_) {}
+        return;
+      }
+
+      setCheckoutItems((prev) =>
+        prev.map((item) => {
+          const itemRealId = item.productId || item.id;
+          const targetId = currentItem.productId || currentItem.id;
+          if (itemRealId === targetId && (item.variantId || null) === (currentItem.variantId || null)) {
+            return updatedItem;
+          }
+          return item;
+        })
+      );
+    },
+    [isBuyNow]
+  );
+
+  const onCheckoutSubmit = async (data) => {
+    try {
+      setLoading(true);
+      const items = checkoutItems;
+
+      if (items.length === 0) {
+        toast.error("No items to checkout");
+        return;
+      }
+
+      const customerId = data.customerId;
+      if (!customerId) {
+        toast.error("Customer information is required.");
+        return;
+      }
+
+      if (!data.customerAddressId) {
+        toast.error("Shipping address is required");
+        return;
+      }
+
+      const shippingMethod = watch("shipping") || "dhaka-city";
+      const resolvedCharges = deliveryCharges || calculateDeliveryCharges(items);
+      const shippingCost =
+        shippingMethod === "outside"
+          ? resolvedCharges.outsideDhaka
+          : resolvedCharges.insideDhaka;
+
+      let subtotalBeforeDiscount = 0;
+      let totalProductDiscount = 0;
+      let totalVAT = 0;
+
+      items.forEach((item) => {
+        const quantity = parseInt(item.quantity || 1);
+        const originalPrice = parseFloat(item.originalPrice || item.price || 0);
+        const currentPrice = parseFloat(item.price || 0);
+
+        subtotalBeforeDiscount += originalPrice * quantity;
+        const discountPerUnit = originalPrice > currentPrice ? (originalPrice - currentPrice) : parseFloat(item.discountAmount || 0);
+        totalProductDiscount += discountPerUnit * quantity;
+      });
+
+      // Factor in Order Bump item if checked by customer
+      if (activeBumpItem) {
+        const bumpOrig = parseFloat(activeBumpItem.originalPrice || activeBumpItem.price || 0);
+        const bumpCur = parseFloat(activeBumpItem.price || 0);
+        subtotalBeforeDiscount += bumpOrig;
+        const bumpBaseDisc = bumpOrig > bumpCur ? (bumpOrig - bumpCur) : 0;
+        totalProductDiscount += bumpBaseDisc + bumpExtraDiscount;
+      }
+
+      const subtotalAfterDiscount = subtotalBeforeDiscount - totalProductDiscount;
+      const couponDiscountAmount = couponDiscount || 0;
+
+      let grandTotal =
+        subtotalAfterDiscount + totalVAT + shippingCost - couponDiscountAmount;
+      grandTotal = Math.max(0, grandTotal);
+
+      const apiItems = items.map((item) => {
+        const productId = parseInt(item.productId || item.id);
+        const quantity = parseInt(item.quantity || 1);
+        const originalPrice = parseFloat(item.originalPrice || item.price || 0);
+        const unitPrice = parseFloat(item.price || 0);
+        const isVariant =
+          item.productType === "variant" || item.variantId || item.variantAttributes;
+
+        const discountPerUnit = originalPrice > unitPrice ? (originalPrice - unitPrice) : parseFloat(item.discountAmount || 0);
+        const totalDiscount = discountPerUnit * quantity;
+        const lineTotal = unitPrice * quantity;
+
+        const variantAttrs = item.variantAttributes || item.attributes || null;
+        const variantLabel = safeVariantDisplayLabel({ attributes: variantAttrs, color: item.color, size: item.size }) || null;
+        let variantTypeStr =
+          item.variantType || item.variantTitle || item.variantName || variantLabel || null;
+        if (!variantTypeStr && variantAttrs && typeof variantAttrs === "object") {
+          variantTypeStr = Object.entries(variantAttrs)
+            .map(([k, v]) => `${k}: ${v}`)
+            .join(", ");
+        }
+
+        const variantIdVal = item.variantId ? parseInt(item.variantId) : null;
+        const mainProductName = item.productName || item.name || item.title || "";
+        const formattedProductName = (variantIdVal || variantAttrs) && variantLabel && !mainProductName.toLowerCase().includes(variantLabel.toLowerCase())
+          ? `${mainProductName} - ${variantLabel}`
+          : mainProductName;
+
+        const baseItem = {
+          productId: productId,
+          productName: formattedProductName,
+          name: formattedProductName,
+          sku: item.sku || null,
+          quantity: quantity,
+          unitPrice: unitPrice,
+          price: unitPrice,
+          discount: totalDiscount,
+          discountValue: parseFloat(item.discountValue || 0),
+          discountType: item.discountType || "Percentage",
+          tax: 0,
+          lineTotal: lineTotal,
+          originalPrice: originalPrice,
+          category: item.category || item.categoryName || item.subCategory?.category?.name,
+          brand: item.brand || item.brandName || item.brand?.name,
+          ...(variantIdVal && { variantId: variantIdVal, productVariantId: variantIdVal }),
+          ...(variantAttrs && {
+            variantAttributes: variantAttrs,
+            attributes: variantAttrs,
+            variantType: variantTypeStr || "",
+          }),
+        };
+
+        if (isVariant || variantIdVal || variantAttrs) {
+          if (variantIdVal) {
+            baseItem.variantId = variantIdVal;
+            baseItem.productVariantId = variantIdVal;
+          }
+          baseItem.variantAttributes = variantAttrs || {};
+          baseItem.attributes = variantAttrs || {};
+          baseItem.variantType = variantTypeStr || "";
+          baseItem.productType = "variant";
+        }
+
+        return baseItem;
+      });
+
+      // If customer checked the Order Bump product, add it to apiItems
+      if (activeBumpItem && bumpConfig?.product) {
+        const bumpProd = bumpConfig.product;
+        const bVariant = selectedBumpVariant;
+        const bumpUnitPrice = parseFloat(activeBumpItem.price || 0);
+        const bumpOriginalPrice = parseFloat(activeBumpItem.originalPrice || bumpUnitPrice);
+        const bumpVariantAttrs = bVariant?.attributes || bVariant?.variantAttributes || null;
+        const bumpVariantLabel = bVariant ? safeVariantDisplayLabel(bVariant) : null;
+        const effectiveBumpPrice = Math.max(0, bumpUnitPrice - bumpExtraDiscount);
+        const bumpProdName = bVariant && bumpVariantLabel
+          ? `${bumpProd.productName} - ${bumpVariantLabel}`
+          : bumpProd.productName;
+
+        apiItems.push({
+          productId: bumpProd.id,
+          productName: bumpProdName,
+          name: bumpProdName,
+          sku: bVariant?.sku || bumpProd.sku || null,
+          quantity: 1,
+          unitPrice: effectiveBumpPrice,
+          price: effectiveBumpPrice,
+          discount: bumpExtraDiscount,
+          discountValue: bumpExtraDiscount,
+          discountType: "Fixed",
+          tax: 0,
+          lineTotal: effectiveBumpPrice,
+          originalPrice: bumpOriginalPrice,
+          category: bumpProd.category || bumpProd.categoryName || bumpProd.subCategory?.category?.name,
+          brand: bumpProd.brand || bumpProd.brandName || bumpProd.brand?.name,
+          ...(bVariant?.id && {
+            variantId: bVariant.id,
+            productVariantId: bVariant.id,
+            productType: "variant",
+            variantAttributes: bumpVariantAttrs || {},
+            attributes: bumpVariantAttrs || {},
+            variantType: bumpVariantLabel || "",
+          }),
+        });
+      }
+
+      const orderPayload = {
+        customerId: parseInt(customerId),
+        shippingAddressId: parseInt(data.customerAddressId),
+        paymentMethod:
+          (watch("payment") || "cod") === "cod" ? "COD" : "OnlinePayment",
+        totalAmount: Math.ceil(subtotalBeforeDiscount),
+        discount: Math.ceil(totalProductDiscount),
+        voucher_promo: Math.ceil(couponDiscountAmount),
+        tax: Math.ceil(totalVAT),
+        shippingCost: Math.ceil(shippingCost),
+        grandTotal: Math.ceil(grandTotal),
+        paidAmount: 0,
+        dueAmount: Math.ceil(grandTotal),
+        note: `${data.note || ""}${activeBumpItem ? ` [Order Bump: ${bumpConfig.product.productName}${selectedBumpVariant ? ` (${safeVariantDisplayLabel(selectedBumpVariant)})` : ""}]` : ""}`.trim(),
+        status: "Pending",
+        items: apiItems,
+        orderType: isBuyNow ? "buy_now" : "cart",
+        couponCode: appliedCoupon?.code || null,
+        couponDiscount: couponDiscountAmount || 0,
+        customerEmail: data.email || null,
+        userAgent: typeof window !== "undefined" ? window.navigator?.userAgent : null,
+      };
+
+      const apiUrl = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000").replace(
+        /\/+$/,
+        ""
+      );
+
+      const orderRes = await fetch(`${apiUrl}/api/order`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(orderPayload),
+      });
+
+      const response = await orderRes.json();
+
+      if (!orderRes.ok) {
+        if (response.code === "DUPLICATE_ORDER" || response.isDuplicate) {
+          const waitTimeText = response.remainingTimeBn ? `অনুগ্রহ করে <b>${response.remainingTimeBn}</b> পর পুনরায় অর্ডার করার চেষ্টা করুন।` : "কিছুক্ষণ পর পুনরায় অর্ডার করুন।";
+
+          // Ensure Bengali message even if old English was cached or returned
+          let displayMsg = response.message || "";
+          if (!displayMsg || displayMsg.toLowerCase().includes("you recently placed an order") || displayMsg.toLowerCase().includes("our team is processing it")) {
+            displayMsg = `আপনি ইতিমধ্যে একটি অর্ডার${response.orderNumber ? ` (নম্বর: #${response.orderNumber})` : ''} সম্পন্ন করেছেন যা বর্তমানে প্রসেসিং রয়েছে।`;
+          }
+
+          const trackUrl = response.orderNumber
+            ? `/track-order?orderId=${encodeURIComponent(response.orderNumber)}`
+            : `/track-order`;
+
+          Swal.fire({
+            icon: "warning",
+            title: "দুঃখিত! সম্প্রতি একটি অর্ডার সম্পন্ন হয়েছে",
+            html: `
+              <div style="font-family: 'Hind Siliguri', sans-serif;" class="text-left space-y-4 pt-1">
+                <p class="text-slate-900 text-base sm:text-lg font-semibold leading-relaxed">
+                  ${displayMsg}
+                </p>
+                <div class="bg-amber-50 border-2 border-amber-200 rounded-xl p-4 space-y-2.5">
+                  ${response.orderNumber ? `
+                  <div class="text-sm sm:text-base font-bold flex items-center justify-between gap-2 text-amber-950 flex-wrap">
+                    <span>অর্ডার রেফারেন্স নম্বর:</span>
+                    <span class="bg-amber-200/80 text-amber-950 px-2.5 py-1 rounded-lg font-extrabold tracking-wide">#${response.orderNumber}</span>
+                  </div>` : ''}
+                  <div class="text-amber-900 text-sm sm:text-base font-bold flex items-center gap-2">
+                    <span class="text-lg">⏱️</span>
+                    <span>${waitTimeText}</span>
+                  </div>
+                </div>
+
+                <!-- Track Order Button Banner -->
+                <div class="pt-1">
+                  <a 
+                    href="${trackUrl}" 
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-gradient-to-r from-primary to-[#BF756A] text-white font-bold text-sm sm:text-base shadow-md hover:shadow-lg transition-all duration-200 text-center cursor-pointer no-underline"
+                    style="text-decoration: none;"
+                  >
+                    <span>📦 অর্ডার ট্র্যাক করুন (Live Status)</span>
+                  </a>
+                </div>
+
+                <p class="text-xs sm:text-sm text-slate-500 leading-normal text-center pt-1">
+                  আপনার অর্ডারে কোনো তথ্য সংশোধন বা প্রশ্ন থাকলে অনুগ্রহ করে আমাদের কাস্টমার সাপোর্ট হেল্পলাইনে যোগাযোগ করুন।
+                </p>
+              </div>
+            `,
+            showCancelButton: true,
+            confirmButtonText: "📦 অর্ডার ট্র্যাক করুন",
+            cancelButtonText: "ঠিক আছে, বুঝেছি",
+            confirmButtonColor: "#D48B80",
+            cancelButtonColor: "#64748b",
+            customClass: {
+              popup: "rounded-3xl shadow-2xl p-6 sm:p-8 max-w-lg",
+              title: "text-xl sm:text-2xl font-bold text-slate-900 pt-2",
+              confirmButton: "font-semibold text-base px-6 py-3 rounded-xl shadow-lg order-1",
+              cancelButton: "font-semibold text-base px-6 py-3 rounded-xl shadow-sm order-2",
+            }
+          }).then((result) => {
+            if (result.isConfirmed) {
+              window.open(trackUrl, "_blank");
+            }
+          });
+          return;
+        }
+        throw new Error(response.message || "Failed to submit order");
+      }
+
+      let orderData = null;
+      let successMessage = "Order placed successfully";
+
+      if (response && response.id && response.orderNumber) {
+        orderData = response;
+      } else if (response && response.success === true) {
+        orderData = response.data || response;
+        successMessage = response.message || successMessage;
+      } else if (response && response.data && (response.data.id || response.data.orderNumber)) {
+        orderData = response.data;
+        successMessage = response.message || successMessage;
+      } else {
+        orderData = response;
+      }
+
+      if (!orderData || !orderData.id) {
+        throw new Error("Order created but missing order ID");
+      }
+
+      if (typeof window !== "undefined") {
+        window.__glowbeauty_order_placed__ = true;
+      }
+
+      // Track purchase event in DataLayer with real transaction & customer data (deduplicated)
+      trackPurchase(
+        {
+          ...orderData,
+          recipientName: data.recipientName || orderData.recipientName,
+          phoneNumber: data.phoneNumber || orderData.phoneNumber,
+          address: data.address || orderData.address,
+          city: data.district || orderData.district,
+        },
+        items
+      );
+
+      if (typeof window !== "undefined") {
+        try {
+          localStorage.setItem("last_order", JSON.stringify(orderData));
+          sessionStorage.setItem("last_order", JSON.stringify(orderData));
+
+          const existingOrders = JSON.parse(
+            localStorage.getItem("guest_orders") || "[]"
+          );
+          existingOrders.unshift(orderData);
+          localStorage.setItem("guest_orders", JSON.stringify(existingOrders));
+        } catch (_) {}
+      }
+
+      if (isBuyNow) {
+        clearBuyNowItem();
+      } else {
+        clearCart();
+      }
+
+      Swal.fire({
+        icon: "success",
+        title: "Order Placed Successfully!",
+        html: `<p class="text-sm text-gray-600">Your Order <b>#${orderData.orderNumber || orderData.id}</b> has been received. Our team will contact you shortly.</p>`,
+        confirmButtonText: "Continue Shopping",
+        confirmButtonColor: "#D48B80",
+      }).then(() => {
+        router.push("/");
+      });
+    } catch (error) {
+      console.error("Checkout error:", error);
+      toast.error(error.message || "Failed to place order");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!isLoaded) {
+    return (
+      <div className="bg-[#FAF7F5] text-gray-900 min-h-screen">
+        <Container className="py-10">
+          <div className="flex items-center justify-center min-h-[400px]">
+            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#D48B80]"></div>
+          </div>
+        </Container>
+      </div>
+    );
+  }
+
+  if (checkoutItems.length === 0) {
+    return (
+      <div className="bg-[#FAF7F5] text-gray-900 min-h-screen">
+        <Container className="py-10">
+          <div className="flex items-center gap-2 text-gray-700 mb-6 text-sm">
+            <Link
+              href="/"
+              className="hover:underline hover:text-[#D48B80] flex items-center gap-1 transition"
+            >
+              Home <IoIosArrowForward />
+            </Link>
+            <p className="font-semibold text-gray-900">Checkout</p>
+          </div>
+
+          <div className="text-center min-h-[50vh] flex flex-col items-center justify-center">
+            <FaShoppingBag className="text-7xl text-gray-300 mb-4" />
+            <h2 className="text-2xl font-bold text-gray-800 mb-2">
+              No items to checkout
+            </h2>
+            <p className="text-gray-600 mb-6">
+              Add some products to your cart before checkout.
+            </p>
+            <Link
+              href="/"
+              className="px-6 py-3 bg-[#D48B80] text-white rounded-xl font-bold hover:bg-[#BF756A] transition-colors"
+            >
+              Start Shopping
+            </Link>
+          </div>
+        </Container>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-[#FAF7F5] text-gray-900 min-h-screen">
+      <Container className="py-5 sm:py-8 md:py-10 pb-6 lg:pb-12 text-gray-900">
+        {/* Breadcrumb */}
+        <div className="flex items-center gap-2 text-gray-700 text-xs md:text-sm mb-6">
+          <Link
+            href="/"
+            className="hover:underline hover:text-[#D48B80] flex items-center gap-1 transition"
+          >
+            Home <IoIosArrowForward size={12} />
+          </Link>
+          {!isBuyNow && (
+            <button
+              type="button"
+              onClick={openCartDrawer}
+              className="hover:underline hover:text-[#D48B80] flex items-center gap-1 transition cursor-pointer text-gray-500"
+            >
+              Cart <IoIosArrowForward size={12} />
+            </button>
+          )}
+          <p className="font-bold text-gray-900">Checkout</p>
+        </div>
+
+        {/* Mobile-only Products List Header (Shown at top before Shipping Address on Mobile) */}
+        <div className="block lg:hidden mb-6">
+          <OrderSummary
+            cart={checkoutItems}
+            getCartTotal={getCheckoutTotal}
+            register={register}
+            watch={watch}
+            loading={loading}
+            handleSubmit={handleSubmit}
+            onCheckoutSubmit={onCheckoutSubmit}
+            isBuyNow={isBuyNow}
+            deliveryCharges={deliveryCharges}
+            onCouponApplied={handleCouponApplied}
+            onCouponRemoved={handleCouponRemoved}
+            appliedCoupon={appliedCoupon}
+            couponDiscount={couponDiscount}
+            placeOrderRef={placeOrderRef}
+            onRemoveItem={handleRemoveItem}
+            onUpdateQuantity={handleUpdateQuantity}
+            onSelectVariant={handleSelectVariant}
+            renderOnly="products"
+          />
+        </div>
+
+        {/* Main Layout: Responsive 1-Column on Mobile, 2-Column on Desktop */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+          {/* Left Column: Billing Details */}
+          <div className="lg:col-span-7">
+            <BillingDetails
+              user={user}
+              register={register}
+              errors={errors}
+              watch={watch}
+              setValue={setValue}
+              handleSubmit={handleSubmit}
+              onCheckoutSubmit={onCheckoutSubmit}
+              loading={loading}
+              setLoading={setLoading}
+              totalAmount={getCheckoutTotal()}
+              deliveryCharges={deliveryCharges}
+              placeOrderRef={placeOrderRef}
+              cartItems={checkoutItems}
+            />
+          </div>
+
+          {/* Right Column: Complete Order Summary (Sticky on Desktop) */}
+          <div className="lg:col-span-5 space-y-6 lg:sticky lg:top-24 self-start">
+            {/* Products Section on Desktop (Hidden on Mobile) */}
+            <div className="hidden lg:block">
+              <OrderSummary
+                cart={checkoutItems}
+                getCartTotal={getCheckoutTotal}
+                register={register}
+                watch={watch}
+                loading={loading}
+                handleSubmit={handleSubmit}
+                onCheckoutSubmit={onCheckoutSubmit}
+                isBuyNow={isBuyNow}
+                deliveryCharges={deliveryCharges}
+                onCouponApplied={handleCouponApplied}
+                onCouponRemoved={handleCouponRemoved}
+                appliedCoupon={appliedCoupon}
+                couponDiscount={couponDiscount}
+                placeOrderRef={placeOrderRef}
+                onRemoveItem={handleRemoveItem}
+                onUpdateQuantity={handleUpdateQuantity}
+                onSelectVariant={handleSelectVariant}
+                renderOnly="products"
+              />
+            </div>
+
+            {/* Order Bump Card: Shown right before Order Summary calculation box */}
+            {bumpConfig && bumpConfig.product && (
+              <CheckoutOrderBump
+                bumpConfig={bumpConfig}
+                includeBump={includeBump}
+                setIncludeBump={setIncludeBump}
+                selectedBumpVariant={selectedBumpVariant}
+                setSelectedBumpVariant={setSelectedBumpVariant}
+              />
+            )}
+
+            {/* Order Calculations, Terms, and Place Order Button (Visible on both Mobile & Desktop) */}
+            <OrderSummary
+              cart={checkoutItems}
+              getCartTotal={getCheckoutTotal}
+              register={register}
+              watch={watch}
+              loading={loading}
+              handleSubmit={handleSubmit}
+              onCheckoutSubmit={onCheckoutSubmit}
+              isBuyNow={isBuyNow}
+              deliveryCharges={deliveryCharges}
+              onCouponApplied={handleCouponApplied}
+              onCouponRemoved={handleCouponRemoved}
+              appliedCoupon={appliedCoupon}
+              couponDiscount={couponDiscount}
+              placeOrderRef={placeOrderRef}
+              onRemoveItem={handleRemoveItem}
+              onUpdateQuantity={handleUpdateQuantity}
+              orderBumpItem={activeBumpItem}
+              orderBumpDiscount={bumpExtraDiscount}
+              renderOnly="summary"
+            />
+          </div>
+        </div>
+      </Container>
+    </div>
+  );
+}
