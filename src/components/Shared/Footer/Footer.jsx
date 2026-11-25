@@ -308,7 +308,9 @@ export default async function Footer() {
       {/* 4. BOTTOM COPYRIGHT BAR */}
       <div className="border-t border-[#D48B80]/20 py-6 bg-[#181212]">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-[#C4B3AB]">
-          <p>© {new Date().getFullYear()} Glow Korean Beauty. All Rights Reserved.</p>
+          <p>
+            © {new Date().getFullYear()} Junior Master BD. All Rights Reserved.
+          </p>
           <div className="flex items-center gap-5 text-[11px] uppercase tracking-wider text-[#C4B3AB]">
             <Link
               href="/terms"
